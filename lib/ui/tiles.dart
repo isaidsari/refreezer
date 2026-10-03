@@ -154,8 +154,13 @@ class AlbumTile extends StatelessWidget {
         ],
       ),
       subtitle: Text(
-        album.artistString ?? '',
+        [
+          if ((album.artistString ?? '').isNotEmpty) album.artistString!,
+          //Release year, helps telling apart re-releases (e.g. deluxe editions) with similar titles
+          if ((album.releaseDate ?? '').length >= 4) album.releaseDate!.substring(0, 4),
+        ].join(' • '),
         maxLines: 1,
+        overflow: TextOverflow.ellipsis,
       ),
       leading: CachedImage(
         url: album.art?.thumb ?? '',
