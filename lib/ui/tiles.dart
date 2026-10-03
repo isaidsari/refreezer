@@ -126,9 +126,32 @@ class AlbumTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return ListTile(
-      title: Text(
-        album.title ?? '',
-        maxLines: 1,
+      title: Row(
+        children: [
+          Flexible(
+            child: Text(
+              album.title ?? '',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          if (album.isExplicit)
+            const Padding(
+              padding: EdgeInsets.only(left: 6.0),
+              child: Text(
+                'E',
+                style: TextStyle(color: Colors.red),
+              ),
+            ),
+          if (album.isClean)
+            Padding(
+              padding: const EdgeInsets.only(left: 6.0),
+              child: Text(
+                'Clean'.i18n,
+                style: const TextStyle(color: Colors.grey, fontSize: 12.0),
+              ),
+            ),
+        ],
       ),
       subtitle: Text(
         album.artistString ?? '',

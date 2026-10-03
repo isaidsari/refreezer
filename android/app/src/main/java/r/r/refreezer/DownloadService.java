@@ -124,6 +124,19 @@ public class DownloadService extends Service {
         super.onDestroy();
     }
 
+    //Android 15+ limits dataSync foreground services to 6h per day
+    @Override
+    public void onTimeout(int startId, int fgsType) {
+        logger.warn("Foreground service timeout reached, stopping downloads");
+        stop();
+        releaseLocks();
+        if (foreground) {
+            stopForeground(true);
+            foreground = false;
+        }
+        stopSelf();
+    }
+
     @Override
     public IBinder onBind(Intent intent) {
         //Set messengers
@@ -343,15 +356,8 @@ public class DownloadService extends Service {
             //Set state
             download.state = Download.DownloadState.DOWNLOADING;
 
-            //Authorize deezer api
-            if (!deezer.authorized && !deezer.authorizing)
-                deezer.authorize();
-
-            while (deezer.authorizing)
-                try {
-                    Thread.sleep(50);
-                } catch (Exception ignored) {
-                }
+            //Authorize deezer api (synchronized, other threads wait for it)
+            deezer.authorize();
 
             //Don't fetch meta if user uploaded mp3
             if (!download.isUserUploaded()) {
@@ -411,8 +417,10 @@ public class DownloadService extends Service {
             }
             //File already exists
             if (outFile.exists()) {
-                //Delete if overwriting enabled
-                if (settings.overwriteDownload) {
+                //Delete if overwriting enabled or incomplete (left by older versions)
+                if (settings.overwriteDownload || !isCompleteFile(outFile, qualityInfo.quality)) {
+                    if (!settings.overwriteDownload)
+                        logger.warn("Existing file looks incomplete, downloading again: " + outFile.getPath(), download);
                     outFile.delete();
                 } else {
                     download.state = Download.DownloadState.DONE;
@@ -422,12 +430,21 @@ public class DownloadService extends Service {
             }
 
             //Temporary encrypted file, quality in name so a partial file of a different quality is never resumed
-            File tmpFile = new File(getCacheDir(), download.id + "_" + qualityInfo.quality + ".ENC");
+            File tmpFile = new File(getCacheDir(), download.id + "_" + qualityInfo.trackId + "_" + qualityInfo.quality + ".ENC");
             cleanTmpFiles(tmpFile);
 
-            //Download
+            //Download, retry (resuming) on network errors e.g. when connection drops with screen off
             try {
-                downloadFile(sURL, tmpFile);
+                for (int attempt = 1; ; attempt++) {
+                    try {
+                        downloadFile(sURL, tmpFile);
+                        break;
+                    } catch (java.io.IOException e) {
+                        if (attempt >= 3 || stopDownload) throw e;
+                        logger.warn("Download attempt " + attempt + " failed, retrying: " + e, download);
+                        Thread.sleep(2000L * attempt);
+                    }
+                }
                 if (stopDownload) {
                     download.state = Download.DownloadState.NONE;
                     exit();
@@ -451,7 +468,8 @@ public class DownloadService extends Service {
             if (qualityInfo.encrypted) {
                 File decFile = new File(tmpFile.getPath() + ".DEC");
                 try {
-                    DeezerDecryptor decryptor = new DeezerDecryptor(download.streamTrackId);
+                    //Track id can change on fallback, key must match the downloaded track
+                    DeezerDecryptor decryptor = new DeezerDecryptor(qualityInfo.trackId);
                     decryptor.decryptFile(tmpFile.getPath(), decFile.getPath());
                     tmpFile.delete();
                     tmpFile = decFile;
@@ -534,6 +552,8 @@ public class DownloadService extends Service {
                     URL url = new URL("http://e-cdn-images.deezer.com/images/cover/" + trackJson.getString("md5_image") + "/" + Integer.toString(settings.albumArtResolution) + "x" + Integer.toString(settings.albumArtResolution) + "-000000-80-0-0.jpg");
                     HttpURLConnection connection = (HttpURLConnection) url.openConnection();
                     //Set headers
+                    connection.setConnectTimeout(20000);
+                    connection.setReadTimeout(20000);
                     connection.setRequestMethod("GET");
                     connection.connect();
                     //Open streams
@@ -656,7 +676,7 @@ public class DownloadService extends Service {
                         //Server didn't resume where we left off, partial file can't be used
                         connection.disconnect();
                         tmpFile.delete();
-                        throw new Exception("Invalid Content-Range: " + contentRange);
+                        throw new java.io.IOException("Invalid Content-Range: " + contentRange);
                     }
                 }
             }
@@ -683,7 +703,7 @@ public class DownloadService extends Service {
                 }
                 outputStream.getFD().sync();
                 if (contentLength >= 0 && received != contentLength)
-                    throw new Exception("Incomplete download, received " + received + " of " + contentLength + " bytes");
+                    throw new java.io.IOException("Incomplete download, received " + received + " of " + contentLength + " bytes");
             } finally {
                 connection.disconnect();
             }
@@ -703,6 +723,16 @@ public class DownloadService extends Service {
                 connection.setRequestProperty("Range", "bytes=" + start + "-");
             connection.connect();
             return connection;
+        }
+
+        //Rough check whether an existing file is a complete download, older versions could leave
+        //truncated files under the final name. Compares size to the minimum expected for the duration.
+        private boolean isCompleteFile(File file, int quality) {
+            int duration = trackJson == null ? 0 : trackJson.optInt("duration", 0);
+            if (duration <= 0 || download.isUserUploaded()) return file.length() > 0;
+            //Minimum kbps: MP3 128 / MP3 320 / FLAC (lossless is rarely below this)
+            int minKbps = quality == 1 ? 112 : (quality == 3 ? 280 : 200);
+            return file.length() >= (long) duration * minKbps * 1000 / 8;
         }
 
         //Remove leftover temporary files of this download in other qualities / old naming
@@ -732,6 +762,8 @@ public class DownloadService extends Service {
                 URL url = new URL("http://e-cdn-images.deezer.com/images/cover/" + albumJson.getString("md5_image") + "/" + Integer.toString(settings.albumArtResolution) + "x" + Integer.toString(settings.albumArtResolution) + "-000000-80-0-0.jpg");
                 HttpURLConnection connection = (HttpURLConnection) url.openConnection();
                 //Set headers
+                connection.setConnectTimeout(20000);
+                connection.setReadTimeout(20000);
                 connection.setRequestMethod("GET");
                 connection.connect();
                 //Open streams

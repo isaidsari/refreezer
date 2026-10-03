@@ -48,8 +48,8 @@ public class Deezer {
     String sid;
     String licenseToken;
     String contentLanguage = "en";
-    boolean authorized = false;
-    boolean authorizing = false;
+    volatile boolean authorized = false;
+    volatile boolean authorizing = false;
 
     Deezer() {}
 
@@ -66,7 +66,7 @@ public class Deezer {
     //public native void decryptFile(String trackId, String inputFilename, String outputFilename);
 
     //Authorize GWLight API
-    public void authorize() {
+    public synchronized void authorize() {
         if (!authorized || sid == null || token == null) {
             authorizing = true;
             try {
@@ -87,6 +87,7 @@ public class Deezer {
             URL url = new URL(_url);
             HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
             connection.setConnectTimeout(20000);
+            connection.setReadTimeout(20000);
             connection.setDoOutput(true);
             connection.setRequestMethod("POST");
             connection.setRequestProperty("User-Agent", USER_AGENT);
@@ -169,6 +170,7 @@ public class Deezer {
         connection.setRequestMethod("GET");
         connection.setRequestProperty("Accept-Language", contentLanguage + ",*");
         connection.setConnectTimeout(20000);
+        connection.setReadTimeout(20000);
         connection.connect();
 
         //Get string data
@@ -704,10 +706,16 @@ public class Deezer {
                 URL url = new URL(urlGen.first);
                 HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
                 connection.setRequestMethod("HEAD");
+                connection.setConnectTimeout(20000);
+                connection.setReadTimeout(20000);
                 connection.setRequestProperty("User-Agent", USER_AGENT);
                 connection.setRequestProperty("Accept-Language", "*");
                 connection.setRequestProperty("Accept", "*/*");
-                urlResponseCode = connection.getResponseCode();
+                try {
+                    urlResponseCode = connection.getResponseCode();
+                } finally {
+                    connection.disconnect();
+                }
             }
             //Track not available
             if (urlResponseCode > 400) {

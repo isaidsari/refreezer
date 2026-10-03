@@ -240,9 +240,11 @@ class Album {
       explicitStatus == explicitStatusExplicit ||
       explicitStatus == explicitStatusPartiallyExplicit;
 
+  bool get isClean => explicitStatus == explicitStatusEdited;
+
   //Deezer lists explicit and clean (edited) releases of the same album as
   //separate albums. Merge [incoming] into [albums] skipping already present ids,
-  //and drop clean versions when the explicit version is also listed.
+  //and move clean versions right after their explicit version so they are listed together.
   static List<Album> mergeUnique(List<Album> albums, Iterable<Album> incoming) {
     Set<String?> ids = albums.map((a) => a.id).toSet();
     for (Album a in incoming) {
@@ -251,7 +253,21 @@ class Album {
 
     String key(Album a) => '${a.type?.index}|${(a.title ?? '').trim().toLowerCase()}';
     Set<String> explicitKeys = albums.where((a) => a.isExplicit).map(key).toSet();
-    albums.removeWhere((a) => a.explicitStatus == explicitStatusEdited && explicitKeys.contains(key(a)));
+    Map<String, List<Album>> cleanVersions = {};
+    for (Album a in albums) {
+      if (a.isClean && explicitKeys.contains(key(a))) cleanVersions.putIfAbsent(key(a), () => []).add(a);
+    }
+    if (cleanVersions.isEmpty) return albums;
+
+    List<Album> ordered = [];
+    for (Album a in albums) {
+      if (a.isClean && explicitKeys.contains(key(a))) continue;
+      ordered.add(a);
+      if (a.isExplicit) ordered.addAll(cleanVersions.remove(key(a)) ?? []);
+    }
+    albums
+      ..clear()
+      ..addAll(ordered);
     return albums;
   }
 

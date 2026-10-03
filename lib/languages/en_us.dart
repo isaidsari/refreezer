@@ -9,6 +9,7 @@ const language_en_us = {
     'Download': 'Download',
     'Disk': 'Disk',
     'Offline': 'Offline',
+    'Clean': 'Clean',
     'Top Tracks': 'Top Tracks',
     'Show more tracks': 'Show more tracks',
     'Top': 'Top',
