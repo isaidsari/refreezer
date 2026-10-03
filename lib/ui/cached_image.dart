@@ -87,10 +87,13 @@ class _CachedImageState extends State<CachedImage> {
       );
     }
 
+    //Decode at displayed size instead of full image size (less memory and decoding while scrolling)
+    double dpr = MediaQuery.devicePixelRatioOf(context);
     return CachedNetworkImage(
       imageUrl: widget.url,
       width: widget.width,
       height: widget.height,
+      memCacheWidth: (widget.width != null && widget.width!.isFinite) ? (widget.width! * dpr).round() : null,
       placeholder: (context, url) {
         if (widget.fullThumb) {
           return Image.asset(

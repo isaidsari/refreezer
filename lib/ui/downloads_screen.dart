@@ -304,7 +304,7 @@ class DownloadTile extends StatelessWidget {
       children: [
         ListTile(
           title: Text(download.title!),
-          leading: CachedImage(url: download.image!),
+          leading: CachedImage(url: download.image!, width: 48),
           subtitle: Text(subtitle(), maxLines: 1, overflow: TextOverflow.ellipsis),
           trailing: trailing(),
           onTap: () => onClick(context),
