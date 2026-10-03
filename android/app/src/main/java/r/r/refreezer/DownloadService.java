@@ -149,8 +149,8 @@ public class DownloadService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        //Get messenger
-        if (intent != null) {
+        //Get messenger, keep the current one if intent has none (e.g. startService from updateForeground)
+        if (intent != null && intent.hasExtra("activityMessenger")) {
             activityMessenger = intent.getParcelableExtra("activityMessenger");
         }
 
