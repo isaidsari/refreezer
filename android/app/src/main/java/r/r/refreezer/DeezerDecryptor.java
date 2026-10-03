@@ -39,7 +39,7 @@ public class DeezerDecryptor {
             int bytesRead;
             int chunkCounter = 0;
 
-            while ((bytesRead = fis.read(buffer)) != -1) {
+            while ((bytesRead = readChunk(fis, buffer)) > 0) {
                 // Only every 3rd chunk of exactly 2048 bytes should be decrypted
                 if (bytesRead == 2048 && (chunkCounter % 3) == 0) {
                     buffer = decryptChunk(buffer);
@@ -50,6 +50,21 @@ public class DeezerDecryptor {
         } catch (IOException e) {
             throw e;
         }
+    }
+
+    /**
+     * Reads until the buffer is full or end of stream is reached, so chunk boundaries
+     * always stay aligned to 2048 bytes (a single read() may return fewer bytes).
+     * @return Number of bytes read, 0 on end of stream
+     */
+    private static int readChunk(FileInputStream fis, byte[] buffer) throws IOException {
+        int total = 0;
+        while (total < buffer.length) {
+            int read = fis.read(buffer, total, buffer.length - total);
+            if (read == -1) break;
+            total += read;
+        }
+        return total;
     }
 
     /**
@@ -99,12 +114,12 @@ public class DeezerDecryptor {
      * @param data 2048-byte chunk of data to decrypt
      * @return Decrypted 2048-byte chunk
      */
-    private byte[] decryptChunk(byte[] data) {
+    private byte[] decryptChunk(byte[] data) throws IOException {
         try {
             return cipher.doFinal(data);
         } catch (Exception e) {
             Log.e("D", e.toString());
-            return new byte[0];
+            throw new IOException("Chunk decryption failed", e);
         }
     }
 

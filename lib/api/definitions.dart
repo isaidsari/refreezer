@@ -214,6 +214,9 @@ class Album {
   AlbumType? type;
   String? releaseDate;
   String? favoriteDate;
+  //Deezer EXPLICIT_LYRICS_STATUS (1 = explicit, 3 = edited/clean version, ...)
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  int? explicitStatus;
 
   Album(
       {this.id,
@@ -226,7 +229,31 @@ class Album {
       this.library,
       this.type,
       this.releaseDate,
-      this.favoriteDate});
+      this.favoriteDate,
+      this.explicitStatus});
+
+  static const int explicitStatusExplicit = 1;
+  static const int explicitStatusEdited = 3;
+  static const int explicitStatusPartiallyExplicit = 4;
+
+  bool get isExplicit =>
+      explicitStatus == explicitStatusExplicit ||
+      explicitStatus == explicitStatusPartiallyExplicit;
+
+  //Deezer lists explicit and clean (edited) releases of the same album as
+  //separate albums. Merge [incoming] into [albums] skipping already present ids,
+  //and drop clean versions when the explicit version is also listed.
+  static List<Album> mergeUnique(List<Album> albums, Iterable<Album> incoming) {
+    Set<String?> ids = albums.map((a) => a.id).toSet();
+    for (Album a in incoming) {
+      if (ids.add(a.id)) albums.add(a);
+    }
+
+    String key(Album a) => '${a.type?.index}|${(a.title ?? '').trim().toLowerCase()}';
+    Set<String> explicitKeys = albums.where((a) => a.isExplicit).map(key).toSet();
+    albums.removeWhere((a) => a.explicitStatus == explicitStatusEdited && explicitKeys.contains(key(a)));
+    return albums;
+  }
 
   String? get artistString =>
       artists?.map<String>((art) => art.name ?? '').join(', ');
@@ -267,7 +294,10 @@ class Album {
         type: type,
         releaseDate:
             json['DIGITAL_RELEASE_DATE'] ?? json['PHYSICAL_RELEASE_DATE'],
-        favoriteDate: json['DATE_FAVORITE']);
+        favoriteDate: json['DATE_FAVORITE'],
+        explicitStatus: int.tryParse(
+            (json['EXPLICIT_ALBUM_CONTENT']?['EXPLICIT_LYRICS_STATUS'] ?? '')
+                .toString()));
   }
   Map<String, dynamic> toSQL({off = false}) => {
         'id': id,
@@ -380,9 +410,10 @@ class Artist {
             : ImageDetails.fromPrivateString(json['ART_PICTURE'],
                 type: 'artist'),
         albumCount: albumsJson['total'],
-        albums: (albumsJson['data'] ?? [])
-            .map<Album>((dynamic data) => Album.fromPrivateJson(data))
-            .toList(),
+        albums: Album.mergeUnique(
+            <Album>[],
+            (albumsJson['data'] ?? [])
+                .map<Album>((dynamic data) => Album.fromPrivateJson(data))),
         topTracks: (topJson['data'] ?? [])
             .map<Track>((dynamic data) => Track.fromPrivateJson(data))
             .toList(),

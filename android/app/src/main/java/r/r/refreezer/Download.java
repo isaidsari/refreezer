@@ -15,13 +15,13 @@ public class Download {
     String trackToken;
     String md5origin;
     String mediaVersion;
-    DownloadState state;
+    volatile DownloadState state;
     String title;
     String image;
 
     //Dynamic
-    long received;
-    long filesize;
+    volatile long received;
+    volatile long filesize;
 
     Download(int id, String path, boolean priv, int quality, DownloadState state, String trackId, String md5origin, String mediaVersion, String title, String image, String trackToken, String streamTrackId) {
         this.id = id;

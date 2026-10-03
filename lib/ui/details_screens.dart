@@ -593,14 +593,18 @@ class _DiscographyScreenState extends State<DiscographyScreen> {
   bool _error = false;
   final List<ScrollController> _controllers = [ScrollController(), ScrollController(), ScrollController()];
 
+  //Offset into the raw discography, albums list is deduplicated so its length can't be used
+  int _offset = 0;
+  bool _hasMore = true;
+
   Future _load() async {
-    if (artist.albums.length >= (artist.albumCount ?? 0) || _loading) return;
+    if (!_hasMore || _loading) return;
     setState(() => _loading = true);
 
     //Fetch data
     List<Album> data;
     try {
-      data = await deezerAPI.discographyPage(artist.id ?? '', start: artist.albums.length);
+      data = await deezerAPI.discographyPage(artist.id ?? '', start: _offset);
     } catch (e) {
       setState(() {
         _error = true;
@@ -611,7 +615,9 @@ class _DiscographyScreenState extends State<DiscographyScreen> {
 
     //Save
     setState(() {
-      artist.albums.addAll(data);
+      _offset += data.length;
+      _hasMore = data.isNotEmpty && _offset < (artist.albumCount ?? 0);
+      Album.mergeUnique(artist.albums, data);
       _loading = false;
     });
   }

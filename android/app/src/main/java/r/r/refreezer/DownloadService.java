@@ -7,15 +7,18 @@ import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Message;
 import android.os.Messenger;
+import android.os.PowerManager;
 import android.os.RemoteException;
 import android.util.Log;
 
@@ -58,6 +61,7 @@ public class DownloadService extends Service {
 
     static final String NOTIFICATION_CHANNEL_ID = "refreezerdownloads";
     static final int NOTIFICATION_ID_START = 6969;
+    static final int NOTIFICATION_ID_FOREGROUND = NOTIFICATION_ID_START - 1;
 
     boolean running = false;
     DownloadSettings settings;
@@ -71,10 +75,12 @@ public class DownloadService extends Service {
 
     ArrayList<Download> downloads = new ArrayList<>();
     ArrayList<DownloadThread> threads = new ArrayList<>();
-    ArrayList<Boolean> updateRequests = new ArrayList<>();
-    boolean updating = false;
     Handler progressUpdateHandler = new Handler();
     DownloadLog logger = new DownloadLog();
+    //Keep CPU & network alive while downloading with screen off
+    PowerManager.WakeLock wakeLock;
+    WifiManager.WifiLock wifiLock;
+    boolean foreground = false;
 
     public DownloadService() {
     }
@@ -96,10 +102,21 @@ public class DownloadService extends Service {
         //Get DB
         DownloadsDatabase dbHelper = new DownloadsDatabase(getApplicationContext());
         db = dbHelper.getWritableDatabase();
+
+        //Locks
+        PowerManager powerManager = (PowerManager) getSystemService(Context.POWER_SERVICE);
+        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "refreezer:downloads");
+        wakeLock.setReferenceCounted(false);
+        WifiManager wifiManager = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifiManager != null) {
+            wifiLock = wifiManager.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "refreezer:downloads");
+            wifiLock.setReferenceCounted(false);
+        }
     }
 
     @Override
     public void onDestroy() {
+        releaseLocks();
         //Cancel notifications
         notificationManager.cancelAll();
         //Logger
@@ -139,8 +156,48 @@ public class DownloadService extends Service {
         }
     }
 
+    //Run as foreground service with wake/wifi locks while downloads are active,
+    //otherwise Android kills or freezes the service when the screen turns off
+    private void updateForeground(boolean active) {
+        if (active) {
+            if (!wakeLock.isHeld()) wakeLock.acquire();
+            if (wifiLock != null && !wifiLock.isHeld()) wifiLock.acquire();
+            if (foreground) return;
+            try {
+                //Make sure service is started (not only bound), so it survives activity unbinding
+                startService(new Intent(context, DownloadService.class));
+                android.app.Notification notification = new NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+                        .setContentTitle("Downloading...")
+                        .setSmallIcon(R.drawable.ic_logo)
+                        .setPriority(NotificationCompat.PRIORITY_MIN)
+                        .setOngoing(true)
+                        .build();
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    startForeground(NOTIFICATION_ID_FOREGROUND, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC);
+                } else {
+                    startForeground(NOTIFICATION_ID_FOREGROUND, notification);
+                }
+                foreground = true;
+            } catch (Exception e) {
+                logger.warn("Unable to start foreground service: " + e);
+            }
+        } else {
+            releaseLocks();
+            if (foreground) {
+                stopForeground(true);
+                foreground = false;
+            }
+            stopSelf();
+        }
+    }
+
+    private void releaseLocks() {
+        if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
+        if (wifiLock != null && wifiLock.isHeld()) wifiLock.release();
+    }
+
     //Update download tasks
-    private void updateQueue() {
+    private synchronized void updateQueue() {
         db.beginTransaction();
 
         //Clear downloaded tracks
@@ -199,13 +256,14 @@ public class DownloadService extends Service {
                 running = false;
             }
         }
+        updateForeground(!threads.isEmpty());
         //Send updates to UI
         updateProgress();
         updateState();
     }
 
     //Send state change to UI
-    private void updateState() {
+    private synchronized void updateState() {
         Bundle b = new Bundle();
         b.putBoolean("running", running);
         //Get count of not downloaded tracks
@@ -218,23 +276,13 @@ public class DownloadService extends Service {
         sendMessage(SERVICE_ON_STATE_CHANGE, b);
     }
 
-    //Wrapper to prevent threads racing
+    //Called from download threads, updateQueue is synchronized to prevent threads racing
     private void updateQueueWrapper() {
-        updateRequests.add(true);
-        if (!updating) {
-            updating = true;
-            while (!updateRequests.isEmpty()) {
-                updateQueue();
-                //Because threading
-                if (!updateRequests.isEmpty())
-                    updateRequests.remove(0);
-            }
-        }
-        updating = false;
+        updateQueue();
     }
 
     //Loads downloads from database
-    private void loadDownloads() {
+    private synchronized void loadDownloads() {
         Cursor cursor = db.query("Downloads", null, null, null, null, null, null);
 
         //Parse downloads
@@ -266,7 +314,7 @@ public class DownloadService extends Service {
     }
 
     //Stop downloads
-    private void stop() {
+    private synchronized void stop() {
         running = false;
         for (int i = 0; i < threads.size(); i++) {
             threads.get(i).stopDownload();
@@ -284,7 +332,7 @@ public class DownloadService extends Service {
         JSONObject albumJson;
         JSONObject privateJson;
         Lyrics lyricsData = null;
-        boolean stopDownload = false;
+        volatile boolean stopDownload = false;
 
         DownloadThread(Download download) {
             this.download = download;
@@ -373,59 +421,18 @@ public class DownloadService extends Service {
                 }
             }
 
-            //Temporary encrypted file
-            File tmpFile = new File(getCacheDir(), download.id + ".ENC");
-
-            //Get start bytes offset
-            long start = 0;
-            if (tmpFile.exists()) {
-                start = tmpFile.length();
-            }
+            //Temporary encrypted file, quality in name so a partial file of a different quality is never resumed
+            File tmpFile = new File(getCacheDir(), download.id + "_" + qualityInfo.quality + ".ENC");
+            cleanTmpFiles(tmpFile);
 
             //Download
             try {
-                URL url = new URL(sURL);
-                HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
-                //Set headers
-                connection.setConnectTimeout(30000);
-                connection.setRequestMethod("GET");
-                connection.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36");
-                connection.setRequestProperty("Accept-Language", "*");
-                connection.setRequestProperty("Accept", "*/*");
-                connection.setRequestProperty("Range", "bytes=" + start + "-");
-                connection.connect();
-
-                //Open streams
-                BufferedInputStream inputStream = new BufferedInputStream(connection.getInputStream());
-                OutputStream outputStream = new FileOutputStream(tmpFile.getPath(), true);
-                //Save total
-                download.filesize = start + connection.getContentLength();
-                //Download
-                byte[] buffer = new byte[4096];
-                long received = 0;
-                int read;
-                while ((read = inputStream.read(buffer, 0, 4096)) != -1) {
-                    outputStream.write(buffer, 0, read);
-                    received += read;
-                    download.received = start + received;
-
-                    //Stop/Cancel download
-                    if (stopDownload) {
-                        download.state = Download.DownloadState.NONE;
-                        try {
-                            inputStream.close();
-                            outputStream.close();
-                            connection.disconnect();
-                        } catch (Exception ignored) {
-                        }
-                        exit();
-                        return;
-                    }
+                downloadFile(sURL, tmpFile);
+                if (stopDownload) {
+                    download.state = Download.DownloadState.NONE;
+                    exit();
+                    return;
                 }
-                //On done
-                inputStream.close();
-                outputStream.close();
-                connection.disconnect();
                 //Update
                 download.state = Download.DownloadState.POST;
                 updateProgress();
@@ -442,8 +449,8 @@ public class DownloadService extends Service {
 
             //Decrypt
             if (qualityInfo.encrypted) {
+                File decFile = new File(tmpFile.getPath() + ".DEC");
                 try {
-                    File decFile = new File(tmpFile.getPath() + ".DEC");
                     DeezerDecryptor decryptor = new DeezerDecryptor(download.streamTrackId);
                     decryptor.decryptFile(tmpFile.getPath(), decFile.getPath());
                     tmpFile.delete();
@@ -451,13 +458,19 @@ public class DownloadService extends Service {
                 } catch (Exception e) {
                     logger.error("Decryption error: " + e.toString(), download);
                     e.printStackTrace();
-                    //Shouldn't ever fail
+                    //Don't keep (possibly corrupted) data around
+                    decFile.delete();
+                    tmpFile.delete();
+                    download.state = Download.DownloadState.ERROR;
+                    exit();
+                    return;
                 }
             }
 
 
             //If exists (duplicate download in DB), don't overwrite.
             if (outFile.exists()) {
+                tmpFile.delete();
                 download.state = Download.DownloadState.DONE;
                 exit();
                 return;
@@ -472,22 +485,33 @@ public class DownloadService extends Service {
                 return;
             }
 
-            if (!tmpFile.renameTo(outFile)) {
+            //Work on a hidden file next to the output and rename it once everything is done,
+            //so an interrupted copy/tagging never leaves a broken file under the final name.
+            //Keeps the extension, tagger detects format from it.
+            File partFile = new File(parentDir, "." + download.id + "_" + outFile.getName());
+            partFile.delete();
+            if (!tmpFile.renameTo(partFile)) {
                 try {
                     //Copy file
-                    FileInputStream inputStream = new FileInputStream(tmpFile);
-                    FileOutputStream outputStream = new FileOutputStream(outFile);
-                    FileChannel inputChannel = inputStream.getChannel();
-                    FileChannel outputChannel = outputStream.getChannel();
-                    inputChannel.transferTo(0, inputChannel.size(), outputChannel);
-                    inputStream.close();
-                    outputStream.close();
+                    try (FileInputStream inputStream = new FileInputStream(tmpFile);
+                         FileOutputStream outputStream = new FileOutputStream(partFile)) {
+                        FileChannel inputChannel = inputStream.getChannel();
+                        FileChannel outputChannel = outputStream.getChannel();
+                        long size = inputChannel.size();
+                        long position = 0;
+                        while (position < size) {
+                            position += inputChannel.transferTo(position, size - position, outputChannel);
+                        }
+                        outputStream.getFD().sync();
+                    }
+                    if (partFile.length() != tmpFile.length())
+                        throw new Exception("Size mismatch after copy");
                     //Delete temp
                     tmpFile.delete();
                 } catch (Exception e) {
                     //Clean
                     try {
-                        outFile.delete();
+                        partFile.delete();
                         tmpFile.delete();
                     } catch (Exception ignored) {
                     }
@@ -576,7 +600,7 @@ public class DownloadService extends Service {
 
                 //Tag
                 try {
-                    deezer.tagTrack(outFile.getPath(), trackJson, albumJson, coverFile.getPath(), lyricsData, privateJson, settings);
+                    deezer.tagTrack(partFile.getPath(), trackJson, albumJson, coverFile.getPath(), lyricsData, privateJson, settings);
                 } catch (Exception e) {
                     Log.e("ERR", "Tagging error!");
                     e.printStackTrace();
@@ -591,10 +615,105 @@ public class DownloadService extends Service {
                     downloadAlbumCover(albumJson);
             }
 
+            //Move to final name
+            if (!partFile.renameTo(outFile)) {
+                logger.error("Error renaming file! " + outFile.getPath(), download);
+                partFile.delete();
+                download.state = Download.DownloadState.ERROR;
+                exit();
+                return;
+            }
+
             download.state = Download.DownloadState.DONE;
             //Queue update
             updateQueueWrapper();
-            stopSelf();
+        }
+
+        //Download (or resume) url into file, validates the server honored the range and the length
+        private void downloadFile(String sURL, File tmpFile) throws Exception {
+            long start = tmpFile.exists() ? tmpFile.length() : 0;
+            HttpsURLConnection connection = openConnection(sURL, start);
+            int code = connection.getResponseCode();
+            //Range not satisfiable, partial file is invalid
+            if (start > 0 && code == 416) {
+                connection.disconnect();
+                tmpFile.delete();
+                start = 0;
+                connection = openConnection(sURL, 0);
+                code = connection.getResponseCode();
+            }
+            if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
+                connection.disconnect();
+                throw new Exception("HTTP " + code);
+            }
+            if (start > 0) {
+                if (code == HttpURLConnection.HTTP_OK) {
+                    //Server ignored range and sends whole file, start from scratch
+                    start = 0;
+                } else {
+                    String contentRange = connection.getHeaderField("Content-Range");
+                    if (contentRange == null || !contentRange.startsWith("bytes " + start + "-")) {
+                        //Server didn't resume where we left off, partial file can't be used
+                        connection.disconnect();
+                        tmpFile.delete();
+                        throw new Exception("Invalid Content-Range: " + contentRange);
+                    }
+                }
+            }
+            long contentLength = -1;
+            try {
+                contentLength = Long.parseLong(connection.getHeaderField("Content-Length"));
+            } catch (Exception ignored) {
+            }
+
+            try (BufferedInputStream inputStream = new BufferedInputStream(connection.getInputStream());
+                 FileOutputStream outputStream = new FileOutputStream(tmpFile, start > 0)) {
+                //Save total
+                download.filesize = start + Math.max(contentLength, 0);
+                byte[] buffer = new byte[4096];
+                long received = 0;
+                int read;
+                while ((read = inputStream.read(buffer, 0, 4096)) != -1) {
+                    outputStream.write(buffer, 0, read);
+                    received += read;
+                    download.received = start + received;
+
+                    //Stop/Cancel download, partial file is kept for resuming
+                    if (stopDownload) return;
+                }
+                outputStream.getFD().sync();
+                if (contentLength >= 0 && received != contentLength)
+                    throw new Exception("Incomplete download, received " + received + " of " + contentLength + " bytes");
+            } finally {
+                connection.disconnect();
+            }
+        }
+
+        private HttpsURLConnection openConnection(String sURL, long start) throws Exception {
+            URL url = new URL(sURL);
+            HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
+            //Set headers
+            connection.setConnectTimeout(30000);
+            connection.setReadTimeout(30000);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36");
+            connection.setRequestProperty("Accept-Language", "*");
+            connection.setRequestProperty("Accept", "*/*");
+            if (start > 0)
+                connection.setRequestProperty("Range", "bytes=" + start + "-");
+            connection.connect();
+            return connection;
+        }
+
+        //Remove leftover temporary files of this download in other qualities / old naming
+        private void cleanTmpFiles(File keep) {
+            File[] files = getCacheDir().listFiles();
+            if (files == null) return;
+            for (File f : files) {
+                String name = f.getName();
+                if ((name.startsWith(download.id + "_") || name.startsWith(download.id + ".")) && !f.equals(keep))
+                    f.delete();
+            }
         }
 
         //Each track has own album art, this is to download cover.jpg
@@ -647,7 +766,6 @@ public class DownloadService extends Service {
         //Clean stop/exit
         private void exit() {
             updateQueueWrapper();
-            stopSelf();
         }
 
     }
@@ -661,7 +779,7 @@ public class DownloadService extends Service {
     }
 
     //Updates notification and UI
-    private void updateProgress() {
+    private synchronized void updateProgress() {
         if (threads.size() > 0) {
             //Convert threads to bundles, send to activity;
             Bundle b = new Bundle();
@@ -737,6 +855,12 @@ public class DownloadService extends Service {
 
         @Override
         public void handleMessage(Message msg) {
+            synchronized (DownloadService.this) {
+                handleMessageLocked(msg);
+            }
+        }
+
+        private void handleMessageLocked(Message msg) {
             switch (msg.what) {
                 //Load downloads from DB
                 case SERVICE_LOAD_DOWNLOADS:
@@ -836,7 +960,7 @@ public class DownloadService extends Service {
 
     //Send message to MainActivity
     void sendMessage(int type, Bundle data) {
-        if (serviceMessenger != null) {
+        if (serviceMessenger != null && activityMessenger != null) {
             Message msg = Message.obtain(null, type);
             msg.setData(data);
             try {
