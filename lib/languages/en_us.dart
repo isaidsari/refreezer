@@ -10,6 +10,7 @@ const language_en_us = {
     'Disk': 'Disk',
     'Offline': 'Offline',
     'Clean': 'Clean',
+    'Unavailable': 'Unavailable',
     'Top Tracks': 'Top Tracks',
     'Show more tracks': 'Show more tracks',
     'Top': 'Top',

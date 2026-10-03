@@ -300,10 +300,22 @@ class DownloadManager {
       await b.commit();
     }
 
-    //Create downloads
+    //Titles appearing on more than one disc need the disc in filename
+    Map<String, Set<int>> titleDisks = {};
+    for (Track t in (album.tracks ?? [])) {
+      titleDisks
+          .putIfAbsent((t.title ?? '').trim().toLowerCase(), () => {})
+          .add(t.diskNumber ?? 1);
+    }
+
+    //Create downloads, skip tracks Deezer doesn't provide
     List<Map> out = [];
     for (Track t in (album.tracks ?? [])) {
-      out.add(await Download.jsonFromTrack(t, _generatePath(t, private),
+      if (t.isUnavailable) continue;
+      bool diskSuffix =
+          (titleDisks[(t.title ?? '').trim().toLowerCase()]?.length ?? 0) > 1;
+      out.add(await Download.jsonFromTrack(
+          t, _generatePath(t, private, diskSuffix: diskSuffix),
           private: private, quality: quality));
     }
     await platform.invokeMethod('addDownloads', out);
@@ -347,6 +359,7 @@ class DownloadManager {
     List<Map> out = [];
     for (int i = 0; i < (playlist.tracks?.length ?? 0); i++) {
       Track t = playlist.tracks![i];
+      if (t.isUnavailable) continue;
       out.add(await Download.jsonFromTrack(
           t,
           _generatePath(
@@ -611,7 +624,8 @@ class DownloadManager {
   String _generatePath(Track track, bool private,
       {String? playlistName,
       int? playlistTrackNumber,
-      bool isSingleton = false}) {
+      bool isSingleton = false,
+      bool diskSuffix = false}) {
     String path;
     if (private) {
       path = p.join(offlinePath!, track.id);
@@ -637,13 +651,10 @@ class DownloadManager {
       //Final path
       String filename =
           isSingleton ? settings.singletonFilename : settings.downloadFilename;
-      //Multi disc albums (e.g. deluxe editions) often repeat titles and track numbers on
-      //later discs, without disc folder they would get the same filename as disc 1 and be skipped
-      int disk = track.diskNumber ?? 1;
-      if (!isSingleton &&
-          disk > 1 &&
-          !(settings.albumFolder && settings.albumDiscFolder)) {
-        filename += ' (Disk $disk)';
+      //Same title on multiple discs of an album would get the same filename (without disc
+      //folders) and later ones would be skipped as already existing
+      if (diskSuffix && !(settings.albumFolder && settings.albumDiscFolder)) {
+        filename += ' (Disk ${track.diskNumber ?? 1})';
       }
       path = p.join(path, filename);
       //Playlist track number variable (not accessible in service)

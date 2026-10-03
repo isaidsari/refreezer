@@ -30,6 +30,9 @@ class Track {
   //Date added to playlist / favorites
   int? addedDate;
   Track? fallback;
+  //False when Deezer doesn't provide the track (no streaming rights), null if unknown
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  bool? available;
 
   List<dynamic>? playbackDetails;
   List<dynamic>? playbackDetailsFallback;
@@ -50,7 +53,10 @@ class Track {
       this.explicit,
       this.addedDate,
       this.fallback,
-      this.playbackDetailsFallback});
+      this.playbackDetailsFallback,
+      this.available});
+
+  bool get isUnavailable => available == false;
 
   String? get artistString =>
       artists?.map<String>((art) => art.name ?? '').join(', ');
@@ -147,6 +153,12 @@ class Track {
       diskNumber: int.parse(json['DISK_NUMBER'] ?? '1'),
       explicit: (json['EXPLICIT_LYRICS'].toString() == '1') ? true : false,
       addedDate: json['DATE_ADD'],
+      //Unavailable tracks come with empty RIGHTS
+      available: (json['RIGHTS'] is Map)
+          ? (json['RIGHTS']['STREAM_ADS_AVAILABLE'] == true ||
+              json['RIGHTS']['STREAM_SUB_AVAILABLE'] == true ||
+              json['FALLBACK'] != null)
+          : null,
       fallback: (json['FALLBACK'] != null)
           ? Track.fromPrivateJson(json['FALLBACK'])
           : null,

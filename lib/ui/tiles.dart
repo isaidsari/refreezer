@@ -62,6 +62,13 @@ class _TrackTileState extends State<TrackTile> {
 
   @override
   Widget build(BuildContext context) {
+    Widget tile = _buildTile(context);
+    //Track not provided by Deezer, can't be played or downloaded
+    if (widget.track.isUnavailable) return Opacity(opacity: 0.45, child: tile);
+    return tile;
+  }
+
+  Widget _buildTile(BuildContext context) {
     return ListTile(
       title: Text(
         widget.track.title ?? '',
@@ -90,6 +97,15 @@ class _TrackTileState extends State<TrackTile> {
                 Octicons.primitive_dot,
                 color: Colors.green,
                 size: 12.0,
+              ),
+            ),
+          if (widget.track.isUnavailable)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 2.0),
+              child: Icon(
+                Icons.block,
+                size: 16.0,
+                semanticLabel: 'Unavailable'.i18n,
               ),
             ),
           if (widget.track.explicit ?? false)
