@@ -74,3 +74,4 @@ lib/utils/env.g.dart
 # Possible translations remnants
 translations/refreezer.zip
 translations/ReFreezer (translations).zip
+/android/build/
