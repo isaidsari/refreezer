@@ -26,6 +26,7 @@ import '../service/audio_service.dart';
 import '../settings.dart';
 import '../translations.i18n.dart';
 import 'cached_image.dart';
+import 'details_screens.dart';
 import 'elements.dart';
 import 'lyrics.dart';
 import 'menu.dart';
@@ -263,18 +264,21 @@ class _PlayerScreenHorizontalState extends State<PlayerScreenHorizontal> {
                   Container(
                     height: 4,
                   ),
-                  Text(
-                    GetIt.I<AudioPlayerHandler>()
-                            .mediaItem
-                            .value!
-                            .displaySubtitle ??
-                        '',
-                    maxLines: 1,
-                    textAlign: TextAlign.center,
-                    overflow: TextOverflow.clip,
-                    style: TextStyle(
-                      fontSize: ScreenUtil().setSp(32),
-                      color: Theme.of(context).primaryColor,
+                  GestureDetector(
+                    onTap: () => openNowPlayingArtist(context),
+                    child: Text(
+                      GetIt.I<AudioPlayerHandler>()
+                              .mediaItem
+                              .value!
+                              .displaySubtitle ??
+                          '',
+                      maxLines: 1,
+                      textAlign: TextAlign.center,
+                      overflow: TextOverflow.clip,
+                      style: TextStyle(
+                        fontSize: ScreenUtil().setSp(32),
+                        color: Theme.of(context).primaryColor,
+                      ),
                     ),
                   ),
                 ],
@@ -402,15 +406,21 @@ class _PlayerScreenVerticalState extends State<PlayerScreenVertical> {
             Container(
               height: 4,
             ),
-            Text(
-              GetIt.I<AudioPlayerHandler>().mediaItem.value?.displaySubtitle ??
-                  '',
-              maxLines: 1,
-              textAlign: TextAlign.center,
-              overflow: TextOverflow.clip,
-              style: TextStyle(
-                fontSize: ScreenUtil().setSp(16),
-                color: Theme.of(context).primaryColor,
+            GestureDetector(
+              onTap: () => openNowPlayingArtist(context),
+              child: Text(
+                GetIt.I<AudioPlayerHandler>()
+                        .mediaItem
+                        .value
+                        ?.displaySubtitle ??
+                    '',
+                maxLines: 1,
+                textAlign: TextAlign.center,
+                overflow: TextOverflow.clip,
+                style: TextStyle(
+                  fontSize: ScreenUtil().setSp(16),
+                  color: Theme.of(context).primaryColor,
+                ),
               ),
             ),
           ],
@@ -1197,4 +1207,43 @@ class _QueueScreenState extends State<QueueScreen> with WidgetsBindingObserver {
             ),
     );
   }
+}
+
+//Open artist page of the now playing track (from the artist text in player)
+void openNowPlayingArtist(BuildContext context) {
+  MediaItem? mi = GetIt.I<AudioPlayerHandler>().mediaItem.value;
+  if (mi == null || mi.extras?['show'] != null) return;
+  List<Artist> artists = (Track.fromMediaItem(mi).artists ?? [])
+      .where((a) => (a.id ?? '').isNotEmpty && a.id != 'null')
+      .toList();
+  if (artists.isEmpty) return;
+
+  void open(Artist a) {
+    //Close player, artist page is pushed to the navigator below it
+    Navigator.of(context).pop();
+    customNavigatorKey.currentState
+        ?.push(MaterialPageRoute(builder: (context) => ArtistDetails(a)));
+  }
+
+  if (artists.length == 1) {
+    open(artists.first);
+    return;
+  }
+  showModalBottomSheet(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: artists
+                  .map((a) => ListTile(
+                        leading: const Icon(Icons.recent_actors),
+                        title: Text(a.name ?? ''),
+                        onTap: () {
+                          Navigator.of(sheetContext).pop();
+                          open(a);
+                        },
+                      ))
+                  .toList(),
+            ),
+          ));
 }
