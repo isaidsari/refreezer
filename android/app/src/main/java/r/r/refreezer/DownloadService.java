@@ -29,7 +29,6 @@ import androidx.core.app.NotificationManagerCompat;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -81,6 +80,14 @@ public class DownloadService extends Service {
     PowerManager.WakeLock wakeLock;
     WifiManager.WifiLock wifiLock;
     boolean foreground = false;
+    //Album metadata cache, every track of an album would fetch the same album otherwise
+    final java.util.Map<String, JSONObject> albumCache = java.util.Collections.synchronizedMap(
+            new java.util.LinkedHashMap<String, JSONObject>(16, 0.75f, true) {
+                @Override
+                protected boolean removeEldestEntry(java.util.Map.Entry<String, JSONObject> eldest) {
+                    return size() > 50;
+                }
+            });
 
     public DownloadService() {
     }
@@ -167,6 +174,14 @@ public class DownloadService extends Service {
             NotificationManager nManager = getSystemService(NotificationManager.class);
             nManager.createNotificationChannel(channel);
         }
+    }
+
+    JSONObject getAlbumJson(String albumId) throws Exception {
+        JSONObject album = albumCache.get(albumId);
+        if (album != null) return album;
+        album = deezer.callPublicAPI("album", albumId);
+        if (!album.has("error")) albumCache.put(albumId, album);
+        return album;
     }
 
     //Run as foreground service with wake/wifi locks while downloads are active,
@@ -298,28 +313,28 @@ public class DownloadService extends Service {
     private synchronized void loadDownloads() {
         Cursor cursor = db.query("Downloads", null, null, null, null, null, null);
 
+        //Index of loaded downloads by id
+        java.util.HashMap<Integer, Integer> indexById = new java.util.HashMap<>();
+        for (int i = 0; i < downloads.size(); i++)
+            indexById.put(downloads.get(i).id, i);
+
         //Parse downloads
         while (cursor.moveToNext()) {
 
             //Duplicate check
             int downloadId = cursor.getInt(0);
             Download.DownloadState state = Download.DownloadState.values()[cursor.getInt(1)];
-            boolean skip = false;
-            for (int i = 0; i < downloads.size(); i++) {
-                if (downloads.get(i).id == downloadId) {
-                    if (downloads.get(i).state != state) {
-                        //Different state, update state, only for finished/error
-                        if (downloads.get(i).state.getValue() >= 3) {
-                            downloads.set(i, Download.fromSQL(cursor));
-                        }
-                    }
-                    skip = true;
-                    break;
+            Integer i = indexById.get(downloadId);
+            if (i != null) {
+                //Different state, update state, only for finished/error
+                if (downloads.get(i).state != state && downloads.get(i).state.getValue() >= 3) {
+                    downloads.set(i, Download.fromSQL(cursor));
                 }
+                continue;
             }
             //Add to queue
-            if (!skip)
-                downloads.add(Download.fromSQL(cursor));
+            indexById.put(downloadId, downloads.size());
+            downloads.add(Download.fromSQL(cursor));
         }
         cursor.close();
 
@@ -363,7 +378,7 @@ public class DownloadService extends Service {
             if (!download.isUserUploaded()) {
                 try {
                     trackJson = deezer.callPublicAPI("track", download.trackId);
-                    albumJson = deezer.callPublicAPI("album", Integer.toString(trackJson.getJSONObject("album").getInt("id")));
+                    albumJson = getAlbumJson(Integer.toString(trackJson.getJSONObject("album").getInt("id")));
                 } catch (Exception e) {
                     logger.error("Unable to fetch track and album metadata! " + e, download);
                     e.printStackTrace();
@@ -464,28 +479,6 @@ public class DownloadService extends Service {
 
             //Post processing
 
-            //Decrypt
-            if (qualityInfo.encrypted) {
-                File decFile = new File(tmpFile.getPath() + ".DEC");
-                try {
-                    //Track id can change on fallback, key must match the downloaded track
-                    DeezerDecryptor decryptor = new DeezerDecryptor(qualityInfo.trackId);
-                    decryptor.decryptFile(tmpFile.getPath(), decFile.getPath());
-                    tmpFile.delete();
-                    tmpFile = decFile;
-                } catch (Exception e) {
-                    logger.error("Decryption error: " + e.toString(), download);
-                    e.printStackTrace();
-                    //Don't keep (possibly corrupted) data around
-                    decFile.delete();
-                    tmpFile.delete();
-                    download.state = Download.DownloadState.ERROR;
-                    exit();
-                    return;
-                }
-            }
-
-
             //If exists (duplicate download in DB), don't overwrite.
             if (outFile.exists()) {
                 tmpFile.delete();
@@ -494,7 +487,7 @@ public class DownloadService extends Service {
                 return;
             }
 
-            //Create dirs and copy
+            //Create dirs
             if (!parentDir.exists() && !parentDir.mkdirs()) {
                 //Log & Exit
                 logger.error("Couldn't create output folder: " + parentDir.getPath() + "! ", download);
@@ -504,51 +497,37 @@ public class DownloadService extends Service {
             }
 
             //Work on a hidden file next to the output and rename it once everything is done,
-            //so an interrupted copy/tagging never leaves a broken file under the final name.
+            //so an interrupted decrypt/copy/tagging never leaves a broken file under the final name.
             //Keeps the extension, tagger detects format from it.
             File partFile = new File(parentDir, "." + download.id + "_" + outFile.getName());
             partFile.delete();
-            if (!tmpFile.renameTo(partFile)) {
-                try {
-                    //Copy file
-                    try (FileInputStream inputStream = new FileInputStream(tmpFile);
-                         FileOutputStream outputStream = new FileOutputStream(partFile)) {
-                        FileChannel inputChannel = inputStream.getChannel();
-                        FileChannel outputChannel = outputStream.getChannel();
-                        long size = inputChannel.size();
-                        long position = 0;
-                        while (position < size) {
-                            position += inputChannel.transferTo(position, size - position, outputChannel);
-                        }
-                        outputStream.getFD().sync();
-                    }
-                    if (partFile.length() != tmpFile.length())
-                        throw new Exception("Size mismatch after copy");
-                    //Delete temp
-                    tmpFile.delete();
-                } catch (Exception e) {
-                    //Clean
-                    try {
-                        partFile.delete();
-                        tmpFile.delete();
-                    } catch (Exception ignored) {
-                    }
-                    //Log & Exit
-                    logger.error("Error moving file! " + outFile.getPath() + ", " + e.toString(), download);
-                    e.printStackTrace();
-                    download.state = Download.DownloadState.ERROR;
-                    exit();
-                    return;
+            try {
+                if (qualityInfo.encrypted) {
+                    //Decrypt straight into the part file (saves writing the whole track once more).
+                    //Track id can change on fallback, key must match the downloaded track
+                    new DeezerDecryptor(qualityInfo.trackId).decryptFile(tmpFile.getPath(), partFile.getPath());
+                } else if (!tmpFile.renameTo(partFile)) {
+                    copyFile(tmpFile, partFile);
                 }
+                tmpFile.delete();
+            } catch (Exception e) {
+                //Don't keep (possibly corrupted) data around
+                partFile.delete();
+                tmpFile.delete();
+                logger.error("Error decrypting/moving file! " + outFile.getPath() + ", " + e.toString(), download);
+                e.printStackTrace();
+                download.state = Download.DownloadState.ERROR;
+                exit();
+                return;
             }
 
             //Cover & Tags, ignore on user uploaded
             if (!download.priv && !download.isUserUploaded()) {
 
-                //Download cover for each track
+                //Download cover for each track (only if it is kept or embedded)
                 File coverFile = new File(outFile.getPath().substring(0, outFile.getPath().lastIndexOf('.')) + ".jpg");
 
-                try {
+                if (settings.trackCover || settings.tags.albumArt) try {
                     URL url = new URL("http://e-cdn-images.deezer.com/images/cover/" + trackJson.getString("md5_image") + "/" + Integer.toString(settings.albumArtResolution) + "x" + Integer.toString(settings.albumArtResolution) + "-000000-80-0-0.jpg");
                     HttpURLConnection connection = (HttpURLConnection) url.openConnection();
                     //Set headers
@@ -686,14 +665,14 @@ public class DownloadService extends Service {
             } catch (Exception ignored) {
             }
 
-            try (BufferedInputStream inputStream = new BufferedInputStream(connection.getInputStream());
+            try (InputStream inputStream = connection.getInputStream();
                  FileOutputStream outputStream = new FileOutputStream(tmpFile, start > 0)) {
                 //Save total
                 download.filesize = start + Math.max(contentLength, 0);
-                byte[] buffer = new byte[4096];
+                byte[] buffer = new byte[64 * 1024];
                 long received = 0;
                 int read;
-                while ((read = inputStream.read(buffer, 0, 4096)) != -1) {
+                while ((read = inputStream.read(buffer)) != -1) {
                     outputStream.write(buffer, 0, read);
                     received += read;
                     download.received = start + received;
@@ -733,6 +712,22 @@ public class DownloadService extends Service {
             //Minimum kbps: MP3 128 / MP3 320 / FLAC (lossless is rarely below this)
             int minKbps = quality == 1 ? 112 : (quality == 3 ? 280 : 200);
             return file.length() >= (long) duration * minKbps * 1000 / 8;
+        }
+
+        private void copyFile(File from, File to) throws Exception {
+            try (FileInputStream inputStream = new FileInputStream(from);
+                 FileOutputStream outputStream = new FileOutputStream(to)) {
+                FileChannel inputChannel = inputStream.getChannel();
+                FileChannel outputChannel = outputStream.getChannel();
+                long size = inputChannel.size();
+                long position = 0;
+                while (position < size) {
+                    position += inputChannel.transferTo(position, size - position, outputChannel);
+                }
+                outputStream.getFD().sync();
+            }
+            if (to.length() != from.length())
+                throw new Exception("Size mismatch after copy");
         }
 
         //Remove leftover temporary files of this download in other qualities / old naming
@@ -839,12 +834,20 @@ public class DownloadService extends Service {
         return bundle;
     }
 
+    //Last shown notification progress (state * 1000 + percent) per download, Android drops too frequent updates
+    final java.util.HashMap<Integer, Integer> notificationProgress = new java.util.HashMap<>();
+
     private void updateNotification(Download download) {
         //Cancel notification for done/none/error downloads
         if (download.state == Download.DownloadState.NONE || download.state.getValue() >= 3) {
-            notificationManager.cancel(NOTIFICATION_ID_START + download.id);
+            if (notificationProgress.remove(download.id) != null)
+                notificationManager.cancel(NOTIFICATION_ID_START + download.id);
             return;
         }
+        int percent = download.filesize > 0 ? (int) (download.received * 100 / download.filesize) : 0;
+        int progressKey = download.state.getValue() * 1000 + percent;
+        Integer last = notificationProgress.put(download.id, progressKey);
+        if (last != null && last == progressKey) return;
 
         NotificationCompat.Builder notificationBuilder = new NotificationCompat.Builder(context, DownloadService.NOTIFICATION_CHANNEL_ID)
                 .setContentTitle(download.title)

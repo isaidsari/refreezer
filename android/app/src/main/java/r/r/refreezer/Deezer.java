@@ -165,6 +165,16 @@ public class Deezer {
 
     //api.deezer.com/$method/$param
     public JSONObject callPublicAPI(String method, String param) throws Exception {
+        //Public API is rate limited (50 requests / 5s), returns error code 4 when exceeded
+        for (int attempt = 1; ; attempt++) {
+            JSONObject result = callPublicAPIOnce(method, param);
+            JSONObject error = result.optJSONObject("error");
+            if (error == null || error.optInt("code") != 4 || attempt >= 5) return result;
+            Thread.sleep(1500L * attempt);
+        }
+    }
+
+    private JSONObject callPublicAPIOnce(String method, String param) throws Exception {
         URL url = new URL("https://api.deezer.com/" + method + "/" + param);
         HttpsURLConnection connection = (HttpsURLConnection)url.openConnection();
         connection.setRequestMethod("GET");

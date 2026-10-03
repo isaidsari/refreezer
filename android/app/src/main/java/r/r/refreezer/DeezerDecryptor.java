@@ -2,7 +2,11 @@ package r.r.refreezer;
 
 import android.util.Log;
 
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.security.MessageDigest;
@@ -33,8 +37,9 @@ public class DeezerDecryptor {
      * @throws IOException If an I/O error occurs
      */
     public void decryptFile(String inputFilename, String outputFilename) throws IOException {
-        try (FileInputStream fis = new FileInputStream(inputFilename);
-             FileOutputStream fos = new FileOutputStream(outputFilename)) {
+        FileOutputStream fileOutputStream = new FileOutputStream(outputFilename);
+        try (InputStream fis = new BufferedInputStream(new FileInputStream(inputFilename), 64 * 1024);
+             OutputStream fos = new BufferedOutputStream(fileOutputStream, 64 * 1024)) {
             byte[] buffer = new byte[2048];
             int bytesRead;
             int chunkCounter = 0;
@@ -47,6 +52,8 @@ public class DeezerDecryptor {
                 fos.write(buffer, 0, bytesRead);
                 chunkCounter++;
             }
+            fos.flush();
+            fileOutputStream.getFD().sync();
         } catch (IOException e) {
             throw e;
         }
@@ -57,7 +64,7 @@ public class DeezerDecryptor {
      * always stay aligned to 2048 bytes (a single read() may return fewer bytes).
      * @return Number of bytes read, 0 on end of stream
      */
-    private static int readChunk(FileInputStream fis, byte[] buffer) throws IOException {
+    private static int readChunk(InputStream fis, byte[] buffer) throws IOException {
         int total = 0;
         while (total < buffer.length) {
             int read = fis.read(buffer, total, buffer.length - total);
