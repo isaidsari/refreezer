@@ -883,6 +883,8 @@ class _PlaylistDetailsState extends State<PlaylistDetails> {
 
   @override
   Widget build(BuildContext context) {
+    //Sort once per build (lazily, on first use), the getter copies and sorts the whole list
+    late final List<Track> sortedTracks = sorted;
     return Scaffold(
         body: DraggableScrollbar.rrect(
       controller: _scrollController,
@@ -1076,9 +1078,9 @@ class _PlaylistDetailsState extends State<PlaylistDetails> {
           ),
           const FreezerDivider(),
           ...List.generate(playlist.tracks!.length, (i) {
-            Track t = sorted[i];
+            Track t = sortedTracks[i];
             return TrackTile(t, onTap: () {
-              Playlist p = Playlist(title: playlist.title, id: playlist.id, tracks: sorted);
+              Playlist p = Playlist(title: playlist.title, id: playlist.id, tracks: sortedTracks);
               GetIt.I<AudioPlayerHandler>().playFromPlaylist(p, t.id!);
             }, onHold: () {
               MenuSheet m = MenuSheet();

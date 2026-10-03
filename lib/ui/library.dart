@@ -459,6 +459,8 @@ class _LibraryTracksState extends State<LibraryTracks> {
 
   @override
   Widget build(BuildContext context) {
+    //Sort once per build (lazily, on first use), the getter copies and sorts the whole list
+    late final List<Track> sortedTracks = _sorted;
     return Scaffold(
         appBar: FreezerAppBar(
           'Tracks'.i18n,
@@ -552,14 +554,14 @@ class _LibraryTracksState extends State<LibraryTracks> {
                 //Loved tracks
                 ...List.generate(tracks.length, (i) {
                   Track t = (tracks.length == (trackCount ?? 0))
-                      ? _sorted[i]
+                      ? sortedTracks[i]
                       : tracks[i];
                   return TrackTile(
                     t,
                     onTap: () {
                       GetIt.I<AudioPlayerHandler>().playFromTrackList(
                           (tracks.length == (trackCount ?? 0))
-                              ? _sorted
+                              ? sortedTracks
                               : tracks,
                           t.id!,
                           QueueSource(
@@ -824,6 +826,8 @@ class _AlbumListState extends State<AlbumList> {
 
   @override
   Widget build(BuildContext context) {
+    //Sort once per build (lazily, on first use), the getter copies and sorts the whole list
+    late final List<Album> sortedAlbums = _sortedAlbums;
     if (_isLoading) {
       return const Padding(
         padding: EdgeInsets.all(8.0),
@@ -846,9 +850,9 @@ class _AlbumListState extends State<AlbumList> {
         ListView.builder(
           shrinkWrap: true,
           physics: const NeverScrollableScrollPhysics(),
-          itemCount: _sortedAlbums.length,
+          itemCount: sortedAlbums.length,
           itemBuilder: (context, index) {
-            Album album = _sortedAlbums[index];
+            Album album = sortedAlbums[index];
             return AlbumTile(
               album,
               onTap: () {
@@ -959,6 +963,8 @@ class _LibraryArtistsState extends State<LibraryArtists> {
 
   @override
   Widget build(BuildContext context) {
+    //Sort once per build (lazily, on first use), the getter copies and sorts the whole list
+    late final List<Artist> sortedArtists = _sorted;
     return Scaffold(
         appBar: FreezerAppBar(
           'Artists'.i18n,
@@ -1023,7 +1029,7 @@ class _LibraryArtistsState extends State<LibraryArtists> {
               if (_error) const Center(child: ErrorScreen()),
               if (!_loading && !_error)
                 ...List.generate(_artists.length, (i) {
-                  Artist a = _sorted[i];
+                  Artist a = sortedArtists[i];
                   return ArtistHorizontalTile(
                     a,
                     onTap: () {
@@ -1130,6 +1136,8 @@ class _LibraryPlaylistsState extends State<LibraryPlaylists> {
 
   @override
   Widget build(BuildContext context) {
+    //Sort once per build (lazily, on first use), the getter copies and sorts the whole list
+    late final List<Playlist> sortedPlaylists = _sorted;
     return Scaffold(
         appBar: FreezerAppBar(
           'Playlists'.i18n,
@@ -1245,8 +1253,8 @@ class _LibraryPlaylistsState extends State<LibraryPlaylists> {
               ),
 
               if (_playlists != null)
-                ...List.generate(_sorted.length, (int i) {
-                  Playlist p = (_sorted)[i];
+                ...List.generate(sortedPlaylists.length, (int i) {
+                  Playlist p = sortedPlaylists[i];
                   return PlaylistTile(
                     p,
                     onTap: () => Navigator.of(context).push(MaterialPageRoute(
