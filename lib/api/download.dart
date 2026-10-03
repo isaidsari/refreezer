@@ -635,8 +635,17 @@ class DownloadManager {
         }
       }
       //Final path
-      path = p.join(path,
-          isSingleton ? settings.singletonFilename : settings.downloadFilename);
+      String filename =
+          isSingleton ? settings.singletonFilename : settings.downloadFilename;
+      //Multi disc albums (e.g. deluxe editions) often repeat titles and track numbers on
+      //later discs, without disc folder they would get the same filename as disc 1 and be skipped
+      int disk = track.diskNumber ?? 1;
+      if (!isSingleton &&
+          disk > 1 &&
+          !(settings.albumFolder && settings.albumDiscFolder)) {
+        filename += ' (Disk $disk)';
+      }
+      path = p.join(path, filename);
       //Playlist track number variable (not accessible in service)
       if (playlistTrackNumber != null) {
         path = path.replaceAll(
