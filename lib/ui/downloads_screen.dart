@@ -22,20 +22,63 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
   List<Download> downloads = [];
   StreamSubscription? _stateSubscription;
 
-  //Sublists
-  List<Download> get downloading =>
-      downloads.where((d) => d.state == DownloadState.DOWNLOADING || d.state == DownloadState.POST).toList();
-  List<Download> get queued => downloads.where((d) => d.state == DownloadState.NONE).toList();
-  List<Download> get failed =>
-      downloads.where((d) => d.state == DownloadState.ERROR || d.state == DownloadState.DEEZER_ERROR).toList();
-  List<Download> get finished => downloads.where((d) => d.state == DownloadState.DONE).toList();
+  //Sublists, split in one pass
+  List<Download> downloading = [];
+  List<Download> queued = [];
+  List<Download> failed = [];
+  List<Download> finished = [];
+
+  void _split() {
+    downloading = [];
+    queued = [];
+    failed = [];
+    finished = [];
+    for (Download d in downloads) {
+      switch (d.state) {
+        case DownloadState.DOWNLOADING:
+        case DownloadState.POST:
+          downloading.add(d);
+          break;
+        case DownloadState.NONE:
+          queued.add(d);
+          break;
+        case DownloadState.ERROR:
+        case DownloadState.DEEZER_ERROR:
+          failed.add(d);
+          break;
+        case DownloadState.DONE:
+          finished.add(d);
+          break;
+        default:
+          break;
+      }
+    }
+  }
 
   Future _load() async {
     //Load downloads
     List<Download> d = await downloadManager.getDownloads();
+    if (!mounted) return;
     setState(() {
       downloads = d;
+      _split();
     });
+  }
+
+  //Remove from the list right away, the service removes them asynchronously,
+  //reloading immediately could still return them (and reloading a long list is slow)
+  void _removeLocal(bool Function(Download d) test) {
+    setState(() {
+      downloads.removeWhere(test);
+      _split();
+    });
+  }
+
+  Future _removeByStates(List<DownloadState> states) async {
+    _removeLocal((d) => states.contains(d.state));
+    for (DownloadState state in states) {
+      await downloadManager.removeDownloads(state);
+    }
   }
 
   @override
@@ -54,6 +97,7 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
           for (Map su in e['data']) {
             downloads.firstWhere((d) => d.id == su['id'], orElse: () => Download()).updateFromJson(su);
           }
+          _split();
         });
       }
     });
@@ -68,8 +112,67 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
     super.dispose();
   }
 
+  Widget _header(String text) => Text(
+        text,
+        textAlign: TextAlign.center,
+        style: const TextStyle(fontSize: 24.0, fontWeight: FontWeight.bold),
+      );
+
+  Widget _tile(Download d) => DownloadTile(
+        d,
+        key: ValueKey(d.id),
+        updateCallback: () => _removeLocal((x) => x.id == d.id),
+      );
+
   @override
   Widget build(BuildContext context) {
+    //Flat list of item builders, ListView.builder only builds the visible ones
+    List<Widget Function()> items = [
+      () => Container(height: 2.0),
+      for (Download d in downloading) () => _tile(d),
+      () => Container(height: 8.0),
+
+      //Queued
+      if (queued.isNotEmpty) () => _header('Queued'.i18n),
+      for (Download d in queued) () => _tile(d),
+      if (queued.isNotEmpty)
+        () => ListTile(
+              title: Text('Clear queue'.i18n),
+              leading: const Icon(Icons.delete),
+              onTap: () => _removeByStates([DownloadState.NONE]),
+            ),
+
+      //Failed
+      if (failed.isNotEmpty) () => _header('Failed'.i18n),
+      for (Download d in failed) () => _tile(d),
+      //Restart failed
+      if (failed.isNotEmpty)
+        () => ListTile(
+              title: Text('Restart failed downloads'.i18n),
+              leading: const Icon(Icons.restore),
+              onTap: () async {
+                await downloadManager.retryDownloads();
+                await _load();
+              },
+            ),
+      if (failed.isNotEmpty)
+        () => ListTile(
+              title: Text('Clear failed'.i18n),
+              leading: const Icon(Icons.delete),
+              onTap: () => _removeByStates([DownloadState.ERROR, DownloadState.DEEZER_ERROR]),
+            ),
+
+      //Finished
+      if (finished.isNotEmpty) () => _header('Done'.i18n),
+      for (Download d in finished) () => _tile(d),
+      if (finished.isNotEmpty)
+        () => ListTile(
+              title: Text('Clear downloads history'.i18n),
+              leading: const Icon(Icons.delete),
+              onTap: () => _removeByStates([DownloadState.DONE]),
+            ),
+    ];
+
     return Scaffold(
         appBar: FreezerAppBar(
           'Downloads'.i18n,
@@ -79,13 +182,8 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
                 Icons.delete_sweep,
                 semanticLabel: 'Clear all'.i18n,
               ),
-              onPressed: () async {
-                await downloadManager.removeDownloads(DownloadState.ERROR);
-                await downloadManager.removeDownloads(DownloadState.DEEZER_ERROR);
-                await downloadManager.removeDownloads(DownloadState.DONE);
-                await downloadManager.removeDownloads(DownloadState.NONE);
-                await _load();
-              },
+              onPressed: () => _removeByStates(
+                  [DownloadState.ERROR, DownloadState.DEEZER_ERROR, DownloadState.DONE, DownloadState.NONE]),
             ),
             IconButton(
               icon: Icon(
@@ -104,102 +202,9 @@ class _DownloadsScreenState extends State<DownloadsScreen> {
             )
           ],
         ),
-        body: ListView(
-          children: [
-            //Now downloading
-            Container(height: 2.0),
-            Column(
-                children: List.generate(
-                    downloading.length,
-                    (int i) => DownloadTile(
-                          downloading[i],
-                          updateCallback: () => _load(),
-                        ))),
-            Container(height: 8.0),
-
-            //Queued
-            if (queued.isNotEmpty)
-              Text(
-                'Queued'.i18n,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 24.0, fontWeight: FontWeight.bold),
-              ),
-            Column(
-                children: List.generate(
-                    queued.length,
-                    (int i) => DownloadTile(
-                          queued[i],
-                          updateCallback: () => _load(),
-                        ))),
-            if (queued.isNotEmpty)
-              ListTile(
-                title: Text('Clear queue'.i18n),
-                leading: const Icon(Icons.delete),
-                onTap: () async {
-                  await downloadManager.removeDownloads(DownloadState.NONE);
-                  await _load();
-                },
-              ),
-
-            //Failed
-            if (failed.isNotEmpty)
-              Text(
-                'Failed'.i18n,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 24.0, fontWeight: FontWeight.bold),
-              ),
-            Column(
-                children: List.generate(
-                    failed.length,
-                    (int i) => DownloadTile(
-                          failed[i],
-                          updateCallback: () => _load(),
-                        ))),
-            //Restart failed
-            if (failed.isNotEmpty)
-              ListTile(
-                title: Text('Restart failed downloads'.i18n),
-                leading: const Icon(Icons.restore),
-                onTap: () async {
-                  await downloadManager.retryDownloads();
-                  await _load();
-                },
-              ),
-            if (failed.isNotEmpty)
-              ListTile(
-                title: Text('Clear failed'.i18n),
-                leading: const Icon(Icons.delete),
-                onTap: () async {
-                  await downloadManager.removeDownloads(DownloadState.ERROR);
-                  await downloadManager.removeDownloads(DownloadState.DEEZER_ERROR);
-                  await _load();
-                },
-              ),
-
-            //Finished
-            if (finished.isNotEmpty)
-              Text(
-                'Done'.i18n,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 24.0, fontWeight: FontWeight.bold),
-              ),
-            Column(
-                children: List.generate(
-                    finished.length,
-                    (int i) => DownloadTile(
-                          finished[i],
-                          updateCallback: () => _load(),
-                        ))),
-            if (finished.isNotEmpty)
-              ListTile(
-                title: Text('Clear downloads history'.i18n),
-                leading: const Icon(Icons.delete),
-                onTap: () async {
-                  await downloadManager.removeDownloads(DownloadState.DONE);
-                  await _load();
-                },
-              ),
-          ],
+        body: ListView.builder(
+          itemCount: items.length,
+          itemBuilder: (context, i) => items[i](),
         ));
   }
 }

@@ -969,15 +969,19 @@ public class DownloadService extends Service {
                     if (state == Download.DownloadState.DOWNLOADING || state == Download.DownloadState.POST) return;
 
                     db.beginTransaction();
-                    int i = (downloads.size() - 1);
-                    while (i >= 0) {
-                        Download d = downloads.get(i);
-                        if (d.state == state) {
-                            //Remove
-                            db.delete("Downloads", "id == ?", new String[]{Integer.toString(d.id)});
-                            downloads.remove(i);
-                        }
-                        i--;
+                    //Rebuild list in one pass instead of removing one by one (O(n^2) on long lists)
+                    ArrayList<Download> kept = new ArrayList<>(downloads.size());
+                    ArrayList<String> removedIds = new ArrayList<>();
+                    for (Download d : downloads) {
+                        if (d.state == state) removedIds.add(Integer.toString(d.id));
+                        else kept.add(d);
+                    }
+                    downloads = kept;
+                    //In memory state can be newer than DB, delete those rows by id (in batches, SQLite variable limit)
+                    for (int from = 0; from < removedIds.size(); from += 500) {
+                        java.util.List<String> batch = removedIds.subList(from, Math.min(from + 500, removedIds.size()));
+                        String placeholders = android.text.TextUtils.join(",", java.util.Collections.nCopies(batch.size(), "?"));
+                        db.delete("Downloads", "id IN (" + placeholders + ")", batch.toArray(new String[0]));
                     }
                     //Delete from DB, done downloads after app restart aren't in downloads array
                     db.delete("Downloads", "state == ?", new String[]{Integer.toString(msg.getData().getInt("state"))});
