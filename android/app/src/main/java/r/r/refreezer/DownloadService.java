@@ -10,7 +10,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
-import android.net.Uri;
+import android.media.MediaScannerConnection;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -246,10 +246,11 @@ public class DownloadService extends Service {
                 row.put("quality", d.quality);
                 db.update("Downloads", row, "id == ?", new String[]{Integer.toString(d.id)});
 
-                //Update library
-                if (state == Download.DownloadState.DONE && !d.priv) {
-                    Uri uri = Uri.fromFile(new File(threads.get(i).outFile.getPath()));
-                    sendBroadcast(new Intent(Intent.ACTION_MEDIA_SCANNER_SCAN_FILE, uri));
+                //Update library. ACTION_MEDIA_SCANNER_SCAN_FILE broadcast is ignored on newer Android,
+                //and the media store may have indexed the file before tagging (or not noticed the rename),
+                //which shows the track as unknown artist/album in music players.
+                if (state == Download.DownloadState.DONE && !d.priv && threads.get(i).outFile != null) {
+                    MediaScannerConnection.scanFile(context, new String[]{threads.get(i).outFile.getPath()}, null, null);
                 }
 
                 //Remove thread
@@ -601,7 +602,7 @@ public class DownloadService extends Service {
                 try {
                     deezer.tagTrack(partFile.getPath(), trackJson, albumJson, coverFile.getPath(), lyricsData, privateJson, settings);
                 } catch (Exception e) {
-                    Log.e("ERR", "Tagging error!");
+                    logger.warn("Tagging error: " + e, download);
                     e.printStackTrace();
                 }
 
