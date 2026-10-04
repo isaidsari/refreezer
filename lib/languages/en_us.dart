@@ -11,6 +11,7 @@ const language_en_us = {
     'Offline': 'Offline',
     'Clean': 'Clean',
     'Unavailable': 'Unavailable',
+    'This track is not available on Deezer': 'This track is not available on Deezer',
     'Top Tracks': 'Top Tracks',
     'Show more tracks': 'Show more tracks',
     'Top': 'Top',

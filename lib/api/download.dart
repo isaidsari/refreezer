@@ -248,6 +248,15 @@ class DownloadManager {
       track = await deezerAPI.track(track.id!);
     }
 
+    //Deezer doesn't provide this track, download would only fail
+    if (track.isUnavailable) {
+      Fluttertoast.showToast(
+          msg: 'This track is not available on Deezer'.i18n,
+          toastLength: Toast.LENGTH_SHORT,
+          gravity: ToastGravity.BOTTOM);
+      return false;
+    }
+
     //Add to DB
     if (private) {
       Batch b = db!.batch();
