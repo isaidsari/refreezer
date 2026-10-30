@@ -11,6 +11,10 @@ import android.content.pm.ServiceInfo;
 import android.database.Cursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.media.MediaScannerConnection;
+import android.net.ConnectivityManager;
+import android.net.Network;
+import android.net.NetworkCapabilities;
+import android.net.NetworkInfo;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
@@ -59,6 +63,8 @@ public class DownloadService extends Service {
     static final int SERVICE_REMOVE_DOWNLOADS = 9;
 
     static final String NOTIFICATION_CHANNEL_ID = "refreezerdownloads";
+    //Failed downloads are put back to queue this many times automatically
+    static final int MAX_AUTO_RETRIES = 2;
     static final int NOTIFICATION_ID_START = 6969;
     static final int NOTIFICATION_ID_FOREGROUND = NOTIFICATION_ID_START - 1;
 
@@ -184,6 +190,19 @@ public class DownloadService extends Service {
         return album;
     }
 
+    boolean isNetworkAvailable() {
+        ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (cm == null) return true;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            Network network = cm.getActiveNetwork();
+            if (network == null) return false;
+            NetworkCapabilities capabilities = cm.getNetworkCapabilities(network);
+            return capabilities != null && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        }
+        NetworkInfo info = cm.getActiveNetworkInfo();
+        return info != null && info.isConnected();
+    }
+
     //Run as foreground service with wake/wifi locks while downloads are active,
     //otherwise Android kills or freezes the service when the screen turns off
     private void updateForeground(boolean active) {
@@ -233,6 +252,15 @@ public class DownloadService extends Service {
             Download.DownloadState state = threads.get(i).download.state;
             if (state == Download.DownloadState.NONE || state == Download.DownloadState.DONE || state == Download.DownloadState.ERROR || state == Download.DownloadState.DEEZER_ERROR) {
                 Download d = threads.get(i).download;
+                //Failures are often temporary (connection dropped / switched with screen off),
+                //put it back to queue a few times before giving up
+                if ((state == Download.DownloadState.ERROR || state == Download.DownloadState.DEEZER_ERROR)
+                        && running && d.autoRetries < MAX_AUTO_RETRIES) {
+                    d.autoRetries++;
+                    logger.warn("Download failed, retrying automatically (" + d.autoRetries + "/" + MAX_AUTO_RETRIES + ")", d);
+                    d.state = Download.DownloadState.NONE;
+                    state = Download.DownloadState.NONE;
+                }
                 //Update in queue
                 for (int j = 0; j < downloads.size(); j++) {
                     if (downloads.get(j).id == d.id) {
@@ -372,6 +400,14 @@ public class DownloadService extends Service {
             //Set state
             download.state = Download.DownloadState.DOWNLOADING;
 
+            //No connection (e.g. wifi asleep / switching networks with screen off), wait for it
+            if (!waitForNetwork()) {
+                download.state = stopDownload ? Download.DownloadState.NONE : Download.DownloadState.ERROR;
+                if (!stopDownload) logger.error("No network connection", download);
+                exit();
+                return;
+            }
+
             //Authorize deezer api (synchronized, other threads wait for it)
             deezer.authorize();
 
@@ -456,9 +492,10 @@ public class DownloadService extends Service {
                         downloadFile(sURL, tmpFile);
                         break;
                     } catch (java.io.IOException e) {
-                        if (attempt >= 3 || stopDownload) throw e;
+                        if (attempt >= 5 || stopDownload) throw e;
                         logger.warn("Download attempt " + attempt + " failed, retrying: " + e, download);
-                        Thread.sleep(2000L * attempt);
+                        Thread.sleep(Math.min(2000L << (attempt - 1), 30000L));
+                        if (!waitForNetwork()) throw e;
                     }
                 }
                 if (stopDownload) {
@@ -483,6 +520,7 @@ public class DownloadService extends Service {
             //If exists (duplicate download in DB), don't overwrite.
             if (outFile.exists()) {
                 tmpFile.delete();
+                new File(tmpFile.getPath() + ".etag").delete();
                 download.state = Download.DownloadState.DONE;
                 exit();
                 return;
@@ -511,10 +549,12 @@ public class DownloadService extends Service {
                     copyFile(tmpFile, partFile);
                 }
                 tmpFile.delete();
+                new File(tmpFile.getPath() + ".etag").delete();
             } catch (Exception e) {
                 //Don't keep (possibly corrupted) data around
                 partFile.delete();
                 tmpFile.delete();
+                new File(tmpFile.getPath() + ".etag").delete();
                 logger.error("Error decrypting/moving file! " + outFile.getPath() + ", " + e.toString(), download);
                 e.printStackTrace();
                 download.state = Download.DownloadState.ERROR;
@@ -632,14 +672,23 @@ public class DownloadService extends Service {
         //Download (or resume) url into file, validates the server honored the range and the length
         private void downloadFile(String sURL, File tmpFile) throws Exception {
             long start = tmpFile.exists() ? tmpFile.length() : 0;
-            HttpsURLConnection connection = openConnection(sURL, start);
+            //ETag / Last-Modified of the partial file, server sends the whole file (200) if it changed since
+            File validatorFile = new File(tmpFile.getPath() + ".etag");
+            String validator = null;
+            if (start > 0 && validatorFile.exists()) {
+                try (java.util.Scanner scanner = new java.util.Scanner(validatorFile)) {
+                    if (scanner.hasNextLine()) validator = scanner.nextLine().trim();
+                } catch (Exception ignored) {
+                }
+            }
+            HttpsURLConnection connection = openConnection(sURL, start, validator);
             int code = connection.getResponseCode();
             //Range not satisfiable, partial file is invalid
             if (start > 0 && code == 416) {
                 connection.disconnect();
                 tmpFile.delete();
                 start = 0;
-                connection = openConnection(sURL, 0);
+                connection = openConnection(sURL, 0, null);
                 code = connection.getResponseCode();
             }
             if (code != HttpURLConnection.HTTP_OK && code != HttpURLConnection.HTTP_PARTIAL) {
@@ -665,6 +714,18 @@ public class DownloadService extends Service {
                 contentLength = Long.parseLong(connection.getHeaderField("Content-Length"));
             } catch (Exception ignored) {
             }
+            //Remember validator of a fresh download for resuming
+            if (start == 0) {
+                String newValidator = connection.getHeaderField("ETag");
+                if (newValidator == null) newValidator = connection.getHeaderField("Last-Modified");
+                validatorFile.delete();
+                if (newValidator != null) {
+                    try (FileOutputStream fos = new FileOutputStream(validatorFile)) {
+                        fos.write(newValidator.getBytes());
+                    } catch (Exception ignored) {
+                    }
+                }
+            }
 
             try (InputStream inputStream = connection.getInputStream();
                  FileOutputStream outputStream = new FileOutputStream(tmpFile, start > 0)) {
@@ -689,7 +750,7 @@ public class DownloadService extends Service {
             }
         }
 
-        private HttpsURLConnection openConnection(String sURL, long start) throws Exception {
+        private HttpsURLConnection openConnection(String sURL, long start, String ifRange) throws Exception {
             URL url = new URL(sURL);
             HttpsURLConnection connection = (HttpsURLConnection) url.openConnection();
             //Set headers
@@ -699,10 +760,26 @@ public class DownloadService extends Service {
             connection.setRequestProperty("User-Agent", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/79.0.3945.130 Safari/537.36");
             connection.setRequestProperty("Accept-Language", "*");
             connection.setRequestProperty("Accept", "*/*");
-            if (start > 0)
+            if (start > 0) {
                 connection.setRequestProperty("Range", "bytes=" + start + "-");
+                if (ifRange != null) connection.setRequestProperty("If-Range", ifRange);
+            }
             connection.connect();
             return connection;
+        }
+
+        //Wait up to 5 minutes for a network connection, false if none (or download stopped)
+        private boolean waitForNetwork() {
+            long deadline = System.currentTimeMillis() + 5 * 60 * 1000;
+            while (!isNetworkAvailable()) {
+                if (stopDownload || System.currentTimeMillis() > deadline) return false;
+                try {
+                    Thread.sleep(2000);
+                } catch (InterruptedException e) {
+                    return false;
+                }
+            }
+            return !stopDownload;
         }
 
         //Rough check whether an existing file is a complete download, older versions could leave
@@ -737,7 +814,8 @@ public class DownloadService extends Service {
             if (files == null) return;
             for (File f : files) {
                 String name = f.getName();
-                if ((name.startsWith(download.id + "_") || name.startsWith(download.id + ".")) && !f.equals(keep))
+                if ((name.startsWith(download.id + "_") || name.startsWith(download.id + "."))
+                        && !f.equals(keep) && !name.equals(keep.getName() + ".etag"))
                     f.delete();
             }
         }

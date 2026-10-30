@@ -67,16 +67,29 @@ public class Deezer {
 
     //Authorize GWLight API
     public synchronized void authorize() {
-        if (!authorized || sid == null || token == null) {
+        if (!authorized || sid == null || token == null || token.equals("null")) {
             authorizing = true;
             try {
+                //Fresh session
+                token = null;
+                sid = null;
                 callGWAPI("deezer.getUserData", "{}");
-                authorized = true;
+                authorized = token != null && !token.equals("null");
             } catch (Exception e) {
+                //Retried on next authorize() call (e.g. network was down)
+                token = null;
+                authorized = false;
                 logger.warn("Error authorizing to Deezer API! " + e);
             }
         }
         authorizing = false;
+    }
+
+    //Force new session on next authorize(), e.g. after the API token expired
+    public synchronized void invalidateSession() {
+        authorized = false;
+        token = null;
+        sid = null;
     }
 
     //Make POST request
@@ -141,9 +154,28 @@ public class Deezer {
                 body,
                 cookies
         );
+        if (data == null)
+            throw new java.io.IOException("No response from Deezer (" + method + ")");
 
         //Parse JSON
         JSONObject out = new JSONObject(data);
+
+        //API token expired (long running downloads), get a new session and retry once
+        JSONObject error = out.optJSONObject("error");
+        if (error != null && error.has("VALID_TOKEN_REQUIRED") && !method.equals("deezer.getUserData")) {
+            logger.warn("Deezer API token expired, refreshing session");
+            invalidateSession();
+            authorize();
+            cookies.put("Cookie", "arl=" + arl + (sid == null ? "" : "; sid=" + sid));
+            data = POST(
+                    "https://www.deezer.com/ajax/gw-light.php?method=" + method + "&input=3&api_version=1.0&api_token=" + token,
+                    body,
+                    cookies
+            );
+            if (data == null)
+                throw new java.io.IOException("No response from Deezer (" + method + ")");
+            out = new JSONObject(data);
+        }
 
         //Save token
         if ((token == null || token.equals("null")) && method.equals("deezer.getUserData")) {

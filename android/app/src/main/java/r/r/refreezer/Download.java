@@ -22,6 +22,8 @@ public class Download {
     //Dynamic
     volatile long received;
     volatile long filesize;
+    //Automatic retries after failure in this session (network drops with screen off etc.)
+    int autoRetries = 0;
 
     Download(int id, String path, boolean priv, int quality, DownloadState state, String trackId, String md5origin, String mediaVersion, String title, String image, String trackToken, String streamTrackId) {
         this.id = id;

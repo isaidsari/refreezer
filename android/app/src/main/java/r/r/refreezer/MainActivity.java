@@ -264,8 +264,10 @@ public class MainActivity extends AudioServiceActivity {
 
         connectService();
         //Get DB (and leave open!)
-        DownloadsDatabase dbHelper = new DownloadsDatabase(getApplicationContext());
-        db = dbHelper.getWritableDatabase();
+        if (db == null || !db.isOpen()) {
+            DownloadsDatabase dbHelper = new DownloadsDatabase(getApplicationContext());
+            db = dbHelper.getWritableDatabase();
+        }
 
         //Trust all SSL Certs - Credits to Kilowatt36
         TrustManager[] trustAllCerts = new TrustManager[]{
@@ -299,12 +301,14 @@ public class MainActivity extends AudioServiceActivity {
     @Override
     protected void onStop() {
         super.onStop();
-        db.close();
+        //DB stays open: Flutter keeps running in background and can still add downloads
+        //(e.g. app backgrounded while an album is being queued), it's closed in onDestroy
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (db != null && db.isOpen()) db.close();
         //Stop server
         if (streamServer != null)
             streamServer.stop();
