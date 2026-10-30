@@ -9,10 +9,7 @@ import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
 import org.jaudiotagger.tag.TagOptionSingleton;
 import org.jaudiotagger.tag.flac.FlacTag;
-import org.jaudiotagger.tag.id3.ID3v23Tag;
 import org.jaudiotagger.tag.id3.valuepair.ImageFormats;
-import org.jaudiotagger.tag.images.Artwork;
-import org.jaudiotagger.tag.images.ArtworkFactory;
 import org.jaudiotagger.tag.reference.PictureTypes;
 import org.json.JSONArray;
 import org.json.JSONException;
@@ -485,125 +482,60 @@ public class Deezer {
 
     //Tag track with data from API
     public void tagTrack(String path, JSONObject publicTrack, JSONObject publicAlbum, String cover, Lyrics lyricsData, JSONObject privateJson, DownloadService.DownloadSettings settings) throws Exception {
-        TagOptionSingleton.getInstance().setAndroid(true);
-        //Load file
-        AudioFile f = AudioFileIO.read(new File(path));
-        boolean isFlac = true;
-        if (f.getAudioHeader().getFormat().contains("MPEG")) {
-            f.setTag(new ID3v23Tag());
-            isFlac = false;
-        }
-        Tag tag = f.getTag();
-
-        if (settings.tags.title) tag.setField(FieldKey.TITLE, publicTrack.getString("title"));
-        if (settings.tags.album) tag.setField(FieldKey.ALBUM, publicTrack.getJSONObject("album").getString("title"));
-        //Artist
-        StringBuilder artists = new StringBuilder();
-        for (int i=0; i<publicTrack.getJSONArray("contributors").length(); i++) {
-            String artist = publicTrack.getJSONArray("contributors").getJSONObject(i).getString("name");
-            if (!artists.toString().contains(artist))
-                artists.append(settings.artistSeparator).append(artist);
-        }
         boolean albumAvailable = !publicAlbum.has("error");
-        if (settings.tags.artist) tag.addField(FieldKey.ARTIST, artists.substring(settings.artistSeparator.length()));
-        if (settings.tags.track) tag.setField(FieldKey.TRACK, String.format("%02d", publicTrack.getInt("track_position")));
-        if (settings.tags.disc) tag.setField(FieldKey.DISC_NO, Integer.toString(publicTrack.getInt("disk_number")));
-        if (settings.tags.albumArtist && albumAvailable) tag.setField(FieldKey.ALBUM_ARTIST, publicAlbum.getJSONObject("artist").getString("name"));
-        if (settings.tags.date) tag.setField(FieldKey.YEAR, publicTrack.getString("release_date").substring(0, 4));
-        if (settings.tags.label && albumAvailable) tag.setField(FieldKey.RECORD_LABEL, publicAlbum.getString("label"));
-        if (settings.tags.isrc) tag.setField(FieldKey.ISRC, publicTrack.getString("isrc"));
-        if (settings.tags.upc && albumAvailable) tag.setField(FieldKey.BARCODE, publicAlbum.getString("upc"));
-        if (settings.tags.trackTotal && albumAvailable) tag.setField(FieldKey.TRACK_TOTAL, Integer.toString(publicAlbum.getInt("nb_tracks")));
+        String separator = settings.artistSeparator;
 
-        //BPM
-        if (publicTrack.has("bpm") && (int)publicTrack.getDouble("bpm") > 0)
-            if (settings.tags.bpm) tag.setField(FieldKey.BPM, Integer.toString((int)publicTrack.getDouble("bpm")));
-
-        //Unsynced lyrics
-        if (settings.tags.lyrics && lyricsData != null && lyricsData.getUnsyncedLyrics() != null && !lyricsData.getUnsyncedLyrics().isEmpty()) {
-            try {
-                tag.setField(FieldKey.LYRICS, lyricsData.getUnsyncedLyrics());
-            } catch (Exception e) {
-                Log.w("WARN", "Error adding unsynced lyrics!");
+        //Values to write, null = not written
+        String title = settings.tags.title ? publicTrack.getString("title") : null;
+        String album = settings.tags.album ? publicTrack.getJSONObject("album").getString("title") : null;
+        String artist = null;
+        if (settings.tags.artist) {
+            StringBuilder artists = new StringBuilder();
+            for (int i=0; i<publicTrack.getJSONArray("contributors").length(); i++) {
+                String name = publicTrack.getJSONArray("contributors").getJSONObject(i).getString("name");
+                if (!artists.toString().contains(name))
+                    artists.append(separator).append(name);
             }
+            if (artists.length() > separator.length()) artist = artists.substring(separator.length());
         }
+        String trackNumber = settings.tags.track ? String.format("%02d", publicTrack.getInt("track_position")) : null;
+        String discNumber = settings.tags.disc ? Integer.toString(publicTrack.getInt("disk_number")) : null;
+        String albumArtist = (settings.tags.albumArtist && albumAvailable) ? publicAlbum.getJSONObject("artist").getString("name") : null;
+        String year = settings.tags.date ? publicTrack.getString("release_date").substring(0, 4) : null;
+        String label = (settings.tags.label && albumAvailable) ? publicAlbum.getString("label") : null;
+        String isrc = settings.tags.isrc ? publicTrack.getString("isrc") : null;
+        String upc = (settings.tags.upc && albumAvailable) ? publicAlbum.getString("upc") : null;
+        String trackTotal = (settings.tags.trackTotal && albumAvailable) ? Integer.toString(publicAlbum.getInt("nb_tracks")) : null;
+        String bpm = (settings.tags.bpm && publicTrack.has("bpm") && (int)publicTrack.getDouble("bpm") > 0)
+                ? Integer.toString((int)publicTrack.getDouble("bpm")) : null;
+        String lyrics = (settings.tags.lyrics && lyricsData != null && lyricsData.getUnsyncedLyrics() != null
+                && !lyricsData.getUnsyncedLyrics().isEmpty()) ? lyricsData.getUnsyncedLyrics() : null;
 
         //Genres
-        StringBuilder genres = new StringBuilder();
-        if (albumAvailable) {
+        String genre = null;
+        if (albumAvailable && settings.tags.genre) {
+            StringBuilder genres = new StringBuilder();
             for (int i=0; i<publicAlbum.getJSONObject("genres").getJSONArray("data").length(); i++) {
-                String genre = publicAlbum.getJSONObject("genres").getJSONArray("data").getJSONObject(0).getString("name");
-                if (!genres.toString().contains(genre)) {
-                    genres.append(", ").append(genre);
+                String name = publicAlbum.getJSONObject("genres").getJSONArray("data").getJSONObject(0).getString("name");
+                if (!genres.toString().contains(name)) {
+                    genres.append(", ").append(name);
                 }
             }
-            if (genres.length() > 2 && settings.tags.genre)
-                tag.setField(FieldKey.GENRE, genres.substring(2));
+            if (genres.length() > 2) genre = genres.substring(2);
         }
 
         //Additional tags from private api
+        String composer = null, engineer = null, mixer = null, producer = null, author = null, writer = null;
         if (settings.tags.contributors) {
             try {
                 if (privateJson != null && privateJson.has("SNG_CONTRIBUTORS")) {
                     JSONObject contrib = privateJson.getJSONObject("SNG_CONTRIBUTORS");
-                    //Composer
-                    if (contrib.has("composer")) {
-                        JSONArray composers = contrib.getJSONArray("composer");
-                        StringBuilder composer = new StringBuilder();
-                        for (int i = 0; i < composers.length(); i++)
-                            composer.append(settings.artistSeparator).append(composers.getString(i));
-                        if (composer.length() > 2)
-                            tag.setField(FieldKey.COMPOSER, composer.substring(settings.artistSeparator.length()));
-                    }
-                    //Engineer
-                    if (contrib.has("engineer")) {
-                        JSONArray engineers = contrib.getJSONArray("engineer");
-                        StringBuilder engineer = new StringBuilder();
-                        for (int i = 0; i < engineers.length(); i++)
-                            engineer.append(settings.artistSeparator).append(engineers.getString(i));
-                        if (engineer.length() > 2)
-                            tag.setField(FieldKey.ENGINEER, engineer.substring(settings.artistSeparator.length()));
-                    }
-                    //Mixer
-                    if (contrib.has("mixer")) {
-                        JSONArray mixers = contrib.getJSONArray("mixer");
-                        StringBuilder mixer = new StringBuilder();
-                        for (int i = 0; i < mixers.length(); i++)
-                            mixer.append(settings.artistSeparator).append(mixers.getString(i));
-                        if (mixer.length() > 2)
-                            tag.setField(FieldKey.MIXER, mixer.substring(settings.artistSeparator.length()));
-                    }
-                    //Producer
-                    if (contrib.has("producer")) {
-                        JSONArray producers = contrib.getJSONArray("producer");
-                        StringBuilder producer = new StringBuilder();
-                        for (int i = 0; i < producers.length(); i++)
-                            producer.append(settings.artistSeparator).append(producers.getString(i));
-                        if (producer.length() > 2)
-                            tag.setField(FieldKey.MIXER, producer.substring(settings.artistSeparator.length()));
-                    }
-
-                    //FLAC Only
-                    if (isFlac) {
-                        //Author
-                        if (contrib.has("author")) {
-                            JSONArray authors = contrib.getJSONArray("author");
-                            StringBuilder author = new StringBuilder();
-                            for (int i = 0; i < authors.length(); i++)
-                                author.append(settings.artistSeparator).append(authors.getString(i));
-                            if (author.length() > 2)
-                                ((FlacTag) tag).setField("AUTHOR", author.substring(settings.artistSeparator.length()));
-                        }
-                        //Writer
-                        if (contrib.has("writer")) {
-                            JSONArray writers = contrib.getJSONArray("writer");
-                            StringBuilder writer = new StringBuilder();
-                            for (int i = 0; i < writers.length(); i++)
-                                writer.append(settings.artistSeparator).append(writers.getString(i));
-                            if (writer.length() > 2)
-                                ((FlacTag) tag).setField("WRITER", writer.substring(settings.artistSeparator.length()));
-                        }
-                    }
+                    composer = joinContributors(contrib, "composer", separator);
+                    engineer = joinContributors(contrib, "engineer", separator);
+                    mixer = joinContributors(contrib, "mixer", separator);
+                    producer = joinContributors(contrib, "producer", separator);
+                    author = joinContributors(contrib, "author", separator);
+                    writer = joinContributors(contrib, "writer", separator);
                 }
             } catch (Exception e) {
                 logger.warn("Error writing contributors data: " + e);
@@ -611,39 +543,111 @@ public class Deezer {
         }
 
         File coverFile = new File(cover);
-        boolean addCover = (coverFile.exists() && coverFile.length() > 0);
+        boolean addCover = settings.tags.albumArt && coverFile.exists() && coverFile.length() > 0;
 
-        if (isFlac) {
-            //FLAC Specific tags
-            if (settings.tags.date) ((FlacTag)tag).setField("DATE", publicTrack.getString("release_date"));
-            //Cover
-            if (addCover && settings.tags.albumArt) {
+        //MP3: ID3v2.4, all text UTF-8, see Id3v24Writer (Android's media scanner garbles mixed encodings)
+        if (path.toLowerCase().endsWith(".mp3")) {
+            File file = new File(path);
+            Id3v24Writer.Tag tag = Id3v24Writer.read(file);
+            if (title != null) tag.setText("TIT2", title);
+            if (album != null) tag.setText("TALB", album);
+            if (artist != null) tag.setText("TPE1", artist);
+            if (trackNumber != null) tag.setText("TRCK", trackTotal != null ? trackNumber + "/" + trackTotal : trackNumber);
+            if (discNumber != null) tag.setText("TPOS", discNumber);
+            if (albumArtist != null) tag.setText("TPE2", albumArtist);
+            if (year != null) tag.setText("TDRC", year);
+            if (label != null) tag.setText("TPUB", label);
+            if (isrc != null) tag.setText("TSRC", isrc);
+            if (upc != null) tag.setUserText("BARCODE", upc);
+            if (bpm != null) tag.setText("TBPM", bpm);
+            if (genre != null) tag.setText("TCON", genre);
+            if (composer != null) tag.setText("TCOM", composer);
+            if (engineer != null) tag.setUserText("ENGINEER", engineer);
+            if (mixer != null) tag.setUserText("MIXER", mixer);
+            if (producer != null) tag.setUserText("PRODUCER", producer);
+            if (lyrics != null) tag.setLyrics("eng", "", lyrics);
+            if (addCover) {
                 try (RandomAccessFile cf = new RandomAccessFile(coverFile, "r")) {
                     byte[] coverData = new byte[(int) cf.length()];
-                    cf.read(coverData);
-                    tag.setField(((FlacTag) tag).createArtworkField(
-                            coverData,
-                            PictureTypes.DEFAULT_ID,
-                            ImageFormats.MIME_TYPE_JPEG,
-                            "cover",
-                            settings.albumArtResolution,
-                            settings.albumArtResolution,
-                            24,
-                            0
-                    ));
+                    cf.readFully(coverData);
+                    tag.setCover(coverData);
                 } catch (Exception e) {
-                    logger.warn("Error writing coverFile artwork: " + e);
+                    logger.warn("Error reading cover for tagging: " + e);
                 }
             }
-        } else {
-            if (addCover && settings.tags.albumArt) {
-                Artwork art = ArtworkFactory.createArtworkFromFile(coverFile);
-                tag.addField(art);
+            Id3v24Writer.write(file, tag);
+            return;
+        }
+
+        //FLAC (Vorbis comments, always UTF-8)
+        TagOptionSingleton.getInstance().setAndroid(true);
+        AudioFile f = AudioFileIO.read(new File(path));
+        Tag tag = f.getTag();
+        if (title != null) tag.setField(FieldKey.TITLE, title);
+        if (album != null) tag.setField(FieldKey.ALBUM, album);
+        if (artist != null) tag.addField(FieldKey.ARTIST, artist);
+        if (trackNumber != null) tag.setField(FieldKey.TRACK, trackNumber);
+        if (discNumber != null) tag.setField(FieldKey.DISC_NO, discNumber);
+        if (albumArtist != null) tag.setField(FieldKey.ALBUM_ARTIST, albumArtist);
+        if (year != null) tag.setField(FieldKey.YEAR, year);
+        if (label != null) tag.setField(FieldKey.RECORD_LABEL, label);
+        if (isrc != null) tag.setField(FieldKey.ISRC, isrc);
+        if (upc != null) tag.setField(FieldKey.BARCODE, upc);
+        if (trackTotal != null) tag.setField(FieldKey.TRACK_TOTAL, trackTotal);
+        if (bpm != null) tag.setField(FieldKey.BPM, bpm);
+        if (lyrics != null) {
+            try {
+                tag.setField(FieldKey.LYRICS, lyrics);
+            } catch (Exception e) {
+                Log.w("WARN", "Error adding unsynced lyrics!");
+            }
+        }
+        if (genre != null) tag.setField(FieldKey.GENRE, genre);
+        try {
+            if (composer != null) tag.setField(FieldKey.COMPOSER, composer);
+            if (engineer != null) tag.setField(FieldKey.ENGINEER, engineer);
+            if (mixer != null) tag.setField(FieldKey.MIXER, mixer);
+            if (producer != null) tag.setField(FieldKey.MIXER, producer);
+            if (author != null) ((FlacTag) tag).setField("AUTHOR", author);
+            if (writer != null) ((FlacTag) tag).setField("WRITER", writer);
+        } catch (Exception e) {
+            logger.warn("Error writing contributors data: " + e);
+        }
+
+        //FLAC Specific tags
+        if (settings.tags.date) ((FlacTag)tag).setField("DATE", publicTrack.getString("release_date"));
+        //Cover
+        if (addCover) {
+            try (RandomAccessFile cf = new RandomAccessFile(coverFile, "r")) {
+                byte[] coverData = new byte[(int) cf.length()];
+                cf.read(coverData);
+                tag.setField(((FlacTag) tag).createArtworkField(
+                        coverData,
+                        PictureTypes.DEFAULT_ID,
+                        ImageFormats.MIME_TYPE_JPEG,
+                        "cover",
+                        settings.albumArtResolution,
+                        settings.albumArtResolution,
+                        24,
+                        0
+                ));
+            } catch (Exception e) {
+                logger.warn("Error writing coverFile artwork: " + e);
             }
         }
 
         //Save
         AudioFileIO.write(f);
+    }
+
+    //Contributors of a role joined with separator, null if none
+    private static String joinContributors(JSONObject contrib, String role, String separator) throws JSONException {
+        if (!contrib.has(role)) return null;
+        JSONArray names = contrib.getJSONArray(role);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < names.length(); i++)
+            out.append(separator).append(names.getString(i));
+        return out.length() > 2 ? out.substring(separator.length()) : null;
     }
 
     //Create JSON file, privateJsonData = `song.getLyrics`
